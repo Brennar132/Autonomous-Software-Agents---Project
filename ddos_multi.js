@@ -1,0 +1,29 @@
+// import child_process in ES module
+import { spawn } from 'child_process';
+
+// Function to spawn child processes
+function spawnProcesses() {
+    
+    for (let i = 0; i < 40; i++) {
+        let name = `ddos${i}`;
+        const childProcess = spawn(
+            `nodemon ddos_one.js name=${name}`,
+            { shell: true }
+        );
+
+        // childProcess.stdout.on('data', data => {
+        //     console.log(`Output from ${i}: ${data}`);
+        // });
+
+        // childProcess.stderr.on('data', data => {
+        //     console.error(`Error from ${i}: ${data}`);
+        // });
+
+        // childProcess.on('close', code => {
+        //     console.log(`Child process ${i} exited with code ${code}`);
+        // });
+    }
+
+}
+// Start the processes
+spawnProcesses();
