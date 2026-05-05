@@ -1,23 +1,17 @@
 import { DeliverooApi } from "@unitn-asa/deliveroo-js-client";
 
 const client = new DeliverooApi(
-    'https://deliveroojs25.azurewebsites.net',
-    // 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjJjOTQyMSIsIm5hbWUiOiJtYXJjbyIsInRlYW1JZCI6IjViMTVkMSIsInRlYW1OYW1lIjoiZGlzaSIsInJvbGUiOiJ1c2VyIiwiaWF0IjoxNzQyNTY3NDE4fQ.5m8St0OZo_DCXCriYkLtsguOm1e20-IAN2JNgXL7iUQ'
-    // 'https://deliveroojs2.rtibdi.disi.unitn.it/',
-    // 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQyNmQ1NyIsIm5hbWUiOiJtYXJjbyIsInRlYW1JZCI6ImM3ZjgwMCIsInRlYW1OYW1lIjoiZGlzaSIsInJvbGUiOiJ1c2VyIiwiaWF0IjoxNzQwMDA3NjIwfQ.1lfKRxSSwj3_a4fWnAV44U1koLrphwLkZ9yZnYQDoSw'
-    // 'http://localhost:8080',
-    // 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjRiZDg3MyIsIm5hbWUiOiJtYXJjbyIsInRlYW1JZCI6IjA3ZmU2MiIsInRlYW1OYW1lIjoiZGlzaSIsInJvbGUiOiJ1c2VyIiwiaWF0IjoxNzM4NjAzNjMwfQ.Q9btNkm3VLXsZDsNHYsQm2nGUVfFnF-TWZrz4zPaWM4'
-)
-
-
+    'http://localhost:8080',
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImFlN2Y1NCIsIm5hbWUiOiJhbm9ueW1vdXMiLCJyb2xlIjoidXNlciIsImlhdCI6MTc3NTY0MjI0M30.RtZ6mdaGuDQM5g7cJTCEjVfZJrRQwhKlmTKZmnvbaVM'
+);
 
 /**
  * @type { {id:string, name:string, x:number, y:number, score:number} }
  */
 const me = {id: null, name: null, x: null, y: null, score: null};
-
+console.log( 'sanity check');
 client.onYou( ( {id, name, x, y, score} ) => {
-    // console.log( 'me:', me.x, me.y );
+    console.log( 'me:', me.x, me.y );
     me.id = id;
     me.name = name;
     me.x = x;
@@ -33,14 +27,16 @@ client.onYou( ( {id, name, x, y, score} ) => {
 const parcels = new Map();
 
 client.onParcelsSensing( async ( pp ) => {
+    console.log( 'attempting to sense parcels' );
     for ( let p of pp ) {
+        console.log( 'i sense parcel', p.id, p.x, p.y, p.reward, p.carriedBy );
         parcels.set( `${p.x}_${p.y}`, p );
     }
 } )
 
 
-
-function distance( {x:x1, y:y1}, {x:x2, y:y2} ) {
+//Get the manhattan distance between two points
+function distance( {x:x1, y:y1}, {x:x2, y:y2} ) { 
     const dx = Math.abs( Math.round(x1) - Math.round(x2) )
     const dy = Math.abs( Math.round(y1) - Math.round(y2) )
     return dx + dy;

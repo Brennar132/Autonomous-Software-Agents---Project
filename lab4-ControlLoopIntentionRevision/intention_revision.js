@@ -1,20 +1,18 @@
-import { DeliverooApi } from "@unitn-asa/deliveroo-js-client";
+import 'dotenv/config';
+import { DjsConnect } from "@unitn-asa/deliveroo-js-sdk/client";
 
-const client = new DeliverooApi(
-    // 'https://deliveroojs25.azurewebsites.net',
-    // 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjJjOTQyMSIsIm5hbWUiOiJtYXJjbyIsInRlYW1JZCI6IjViMTVkMSIsInRlYW1OYW1lIjoiZGlzaSIsInJvbGUiOiJ1c2VyIiwiaWF0IjoxNzQyNTY3NDE4fQ.5m8St0OZo_DCXCriYkLtsguOm1e20-IAN2JNgXL7iUQ'
-    'https://deliveroojs2.rtibdi.disi.unitn.it/',
-    // 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQyNmQ1NyIsIm5hbWUiOiJtYXJjbyIsInRlYW1JZCI6ImM3ZjgwMCIsInRlYW1OYW1lIjoiZGlzaSIsInJvbGUiOiJ1c2VyIiwiaWF0IjoxNzQwMDA3NjIwfQ.1lfKRxSSwj3_a4fWnAV44U1koLrphwLkZ9yZnYQDoSw'
-    // 'http://localhost:8080',
-    // 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjRiZDg3MyIsIm5hbWUiOiJtYXJjbyIsInRlYW1JZCI6IjA3ZmU2MiIsInRlYW1OYW1lIjoiZGlzaSIsInJvbGUiOiJ1c2VyIiwiaWF0IjoxNzM4NjAzNjMwfQ.Q9btNkm3VLXsZDsNHYsQm2nGUVfFnF-TWZrz4zPaWM4'
-)
+const socket = DjsConnect();
 
+/** @type { function ({x:number, y:number}, {x:number, y:number}): number } */
 function distance( {x:x1, y:y1}, {x:x2, y:y2}) {
     const dx = Math.abs( Math.round(x1) - Math.round(x2) )
     const dy = Math.abs( Math.round(y1) - Math.round(y2) )
     return dx + dy;
 }
-
+console.log("Söker Handslag :C");
+socket.onConnect(() => {
+    console.log("Handslag!");
+});
 
 
 /**
@@ -24,14 +22,14 @@ function distance( {x:x1, y:y1}, {x:x2, y:y2}) {
 /**
  * @type { {id:string, name:string, x:number, y:number, score:number} }
  */
-const me = {id: null, name: null, x: null, y: null, score: null};
+const me = {id: '', name: '', x: -1, y: -1, score: 0}; // my position and score are updated at every 'you' event, which is emitted at every sensing event
 
-client.onYou( ( {id, name, x, y, score} ) => {
-    me.id = id
-    me.name = name
-    me.x = x
-    me.y = y
-    me.score = score
+socket.onYou( ( {id, name, x, y, score} ) => { // Update position and score of the agent
+    me.id = id;
+    me.name = name;
+    me.x = x ? x : -1;
+    me.y = y ? y : -1;
+    me.score = score;
 } )
 
 /**
@@ -39,16 +37,61 @@ client.onYou( ( {id, name, x, y, score} ) => {
  */
 const parcels = new Map();
 
-client.onParcelsSensing( async ( pp ) => {
-    for (const p of pp) {
+socket.onSensing( async ( sensing ) => { // Update parcels information Delete/Add parcels based on sensing information
+    for (const p of sensing.parcels) {
         parcels.set( p.id, p);
     }
     for ( const p of parcels.values() ) {
-        if ( pp.map( p => p.id ).find( id => id == p.id ) == undefined ) {
+        if ( sensing.parcels.map( p => p.id ).find( id => id == p.id ) == undefined ) {
             parcels.delete( p.id );
         }
     }
 } )
+
+socket.onSensing( async ( sensing ) => { // Log sensing information
+    for (const p of sensing.positions) {
+        //console.log( 'Position:', p );
+    
+    }
+} );
+//------------------------Adding TIle Information------------------------
+/**
+ * @type { Map< string, {x:number, y:number, type:string} > }
+ */
+
+const tileMap = new Map();
+const dropoffs = new Map(); 
+const spawnPoints = new Map();
+
+socket.onTile(({x, y, type}) => {
+    const key = `${x}_${y}`;
+    tileMap.set(key, {x, y, type});
+    if (type == "1") {
+        spawnPoints.set(key, {x, y, type});
+        console.log('spawn point found!:', {x, y});
+    }
+    if (type == "2") {
+        dropoffs.set(key, {x, y, type});
+        console.log('Dropoff:', {x, y});
+    }
+
+});
+
+function nearestDropoff() {
+    let best = null;
+    let bestDist = Infinity;
+
+    for (const d of dropoffs.values()) {
+        const dDist = distance(me, d);
+        if (dDist < bestDist) {
+            best = d;
+            bestDist = dDist;
+        }
+    }
+
+    return best;
+}
+
 
 
 
@@ -61,8 +104,20 @@ function optionsGeneration () {
 
     /**
      * Options generation
+     * @type { Array< [string, ...any] > }
      */
     const options = []
+
+    const carrying = Array.from(parcels.values()).filter( p => p.carriedBy == me.id );
+    if ( carrying.length > 0 ) { //Needs to be revised
+        for ( const dropoff of dropoffs.values() ) {
+            options.push( [ 'go_to_dropoff', dropoff.x, dropoff.y ] );
+            // myAgent.push( [ 'go_to_dropoff', dropoff.x, dropoff.y ] )
+        }
+    }
+
+
+
     for (const parcel of parcels.values())
         if ( ! parcel.carriedBy )
             options.push( [ 'go_pick_up', parcel.x, parcel.y, parcel.id ] );
@@ -71,33 +126,74 @@ function optionsGeneration () {
     /**
      * Options filtering
      */
-    let best_option;
-    let nearest = Number.MAX_VALUE;
-    for (const option of options) {
-        if ( option[0] == 'go_pick_up' ) {
-            let [go_pick_up,x,y,id] = option;
-            let current_d = distance( {x, y}, me )
-            if ( current_d < nearest ) {
-                best_option = option
-                nearest = current_d
+
+    if (carrying.length === 0) {
+        const hasFreeParcels = Array.from(parcels.values()).some(p => !p.carriedBy);
+
+        if (!hasFreeParcels) {
+            const exploreTarget = getExploreTarget();
+            if (exploreTarget) {
+                options.push(['go_to_discover', exploreTarget.x, exploreTarget.y]);
+                console.log('No free parcels, exploring:', exploreTarget);
             }
         }
+    }
+
+    let best_option;
+    let nearest = Number.MAX_VALUE;
+   for (const option of options) {
+
+        let [, x, y] = option;
+        let current_d = distance({x, y}, me);
+
+        if (carrying.length > 0) {
+            if (option[0] !== 'go_to_dropoff') continue;
+        } else {
+            if (option[0] !== 'go_pick_up' && option[0] !== 'go_to_discover') continue;
+        }
+
+        if (current_d < nearest) {
+            best_option = option;
+            nearest = current_d;
+        }
+
     }
 
     /**
      * Best option is selected
      */
-    if ( best_option )
-        myAgent.push( best_option )
+   if (best_option) {
+        myAgent.push(best_option);
+    } else {
+        console.log("No valid option found", {carrying: carrying.length,options});
+}
 
+}
+
+function getExploreTarget() {
+    // 1. intenta tiles conocidos pero lejanos
+    let candidates = Array.from(tileMap.values());
+
+    if (candidates.length > 0) {
+        return candidates[Math.floor(Math.random() * candidates.length)];
+    }
+
+    // 2. fallback: moverse random cerca
+    const dirs = [
+        {x: me.x + 1, y: me.y},
+        {x: me.x - 1, y: me.y},
+        {x: me.x, y: me.y + 1},
+        {x: me.x, y: me.y - 1}
+    ];
+
+    return dirs[Math.floor(Math.random() * dirs.length)];
 }
 
 /**
  * Generate options at every sensing event
  */
-client.onParcelsSensing( optionsGeneration )
-client.onAgentsSensing( optionsGeneration )
-client.onYou( optionsGeneration )
+socket.onSensing( optionsGeneration )
+socket.onYou( optionsGeneration )
 
 // /**
 //  * Alternatively, generate options continuously
@@ -118,6 +214,7 @@ client.onYou( optionsGeneration )
  */
 class IntentionRevision {
 
+    /** @type {IntentionDeliberation[]} */
     #intention_queue = new Array();
     get intention_queue () {
         return this.#intention_queue;
@@ -158,14 +255,28 @@ class IntentionRevision {
 
     // async push ( predicate ) { }
 
+    /** @type { function(...any): void } */
     log ( ...args ) {
         console.log( ...args )
     }
 
+    /**
+     * @abstract
+     * @param { [string, ...any] } predicate is in the form ['go_to', x, y]
+     */
+    async push ( predicate ) {
+    }
+
 }
 
+/**
+ * @extends { IntentionRevision }
+ */
 class IntentionRevisionQueue extends IntentionRevision {
 
+    /**
+     * @param { [string, ...any] } predicate is in the form ['go_to', x, y]
+     */
     async push ( predicate ) {
         
         // Check if already queued
@@ -173,7 +284,7 @@ class IntentionRevisionQueue extends IntentionRevision {
             return; // intention is already queued
 
         console.log( 'IntentionRevisionReplace.push', predicate );
-        const intention = new Intention( this, predicate );
+        const intention = new IntentionDeliberation( this, predicate );
         this.intention_queue.push( intention );
     }
 
@@ -181,6 +292,9 @@ class IntentionRevisionQueue extends IntentionRevision {
 
 class IntentionRevisionReplace extends IntentionRevision {
 
+    /**
+     * @param { [string, ...any] } predicate is in the form ['go_to', x, y]
+     */
     async push ( predicate ) {
 
         // Check if already queued
@@ -190,7 +304,7 @@ class IntentionRevisionReplace extends IntentionRevision {
         }
         
         console.log( 'IntentionRevisionReplace.push', predicate );
-        const intention = new Intention( this, predicate );
+        const intention = new IntentionDeliberation( this, predicate );
         this.intention_queue.push( intention );
         
         // Force current intention stop 
@@ -203,6 +317,9 @@ class IntentionRevisionReplace extends IntentionRevision {
 
 class IntentionRevisionRevise extends IntentionRevision {
 
+    /**
+     * @param { [string, ...any] } predicate is in the form ['go_to', x, y]
+     */
     async push ( predicate ) {
         console.log( 'Revising intention queue. Received', ...predicate );
         // TODO
@@ -225,20 +342,21 @@ myAgent.loop();
 
 
 /**
- * Intention
+ * IntentionDeliberation
  */
-class Intention {
+class IntentionDeliberation {
 
-    // Plan currently used for achieving the intention 
+    // Plan currently used for achieving the desire 
+    /** @type { Plan | undefined } */
     #current_plan;
     
-    // This is used to stop the intention
+    // This is used to stop the intentionDeliberation
     #stopped = false;
     get stopped () {
         return this.#stopped;
     }
     stop () {
-        // this.log( 'stop intention', ...this.#predicate );
+        // this.log( 'stop intentionDeliberation', ...this.#predicate );
         this.#stopped = true;
         if ( this.#current_plan)
             this.#current_plan.stop();
@@ -250,21 +368,24 @@ class Intention {
     #parent;
 
     /**
-     * @type { any[] } predicate is in the form ['go_to', x, y]
+     * Desire to be achieved, for example ['go_to', x, y]
+     * @type { [string, ...any] } predicate is in the form ['go_to', x, y]
      */
+    #predicate;
     get predicate () {
         return this.#predicate;
     }
-    /**
-     * @type { any[] } predicate is in the form ['go_to', x, y]
-     */
-    #predicate;
 
+    /**
+     * @param { IntentionDeliberation } parent 
+     * @param { [string, ...any] } predicate 
+     */
     constructor ( parent, predicate ) {
         this.#parent = parent;
         this.#predicate = predicate;
     }
 
+    /** @type { function(...any): void } */
     log ( ...args ) {
         if ( this.#parent && this.#parent.log )
             this.#parent.log( '\t', ...args )
@@ -275,11 +396,12 @@ class Intention {
     #started = false;
     /**
      * Using the plan library to achieve an intention
+     * @returns { Promise<boolean> } the result of the plan execution
      */
     async achieve () {
         // Cannot start twice
         if ( this.#started)
-            return this;
+            return false;
         else
             this.#started = true;
 
@@ -296,9 +418,9 @@ class Intention {
                 this.log('achieving intention', ...this.predicate, 'with plan', planClass.name);
                 // and plan is executed and result returned
                 try {
-                    const plan_res = await this.#current_plan.execute( ...this.predicate );
+                    const plan_res = await this.#current_plan?.execute( ...this.predicate );
                     this.log( 'succesful intention', ...this.predicate, 'with plan', planClass.name, 'with result:', plan_res );
-                    return plan_res
+                    return plan_res || false;
                 // or errors are caught so to continue with next plan
                 } catch (error) {
                     this.log( 'failed intention', ...this.predicate,'with plan', planClass.name, 'with error:', error );
@@ -318,11 +440,33 @@ class Intention {
 }
 
 /**
+ * @typedef { {
+ *      stop: ()=>void,
+ *      stopped: boolean,
+ *      log: (...arg0: any[])=>void,
+ *      subIntention: (predicate: any) => Promise<any>,
+ *      execute: function (string, ...any) : Promise<boolean>
+ * } } Plan
+ */
+
+/**
+ * @typedef { {
+ *      name: string,
+ *      isApplicableTo: function (string, ...any) : boolean,
+ *      prototype: Plan
+ * } } PlanClass
+ */
+
+/**
  * Plan library
+ * @type { PlanClass [] }
  */
 const planLibrary = [];
 
-class Plan {
+/**
+ * @abstract
+ */
+class PlanBase {
 
     // This is used to stop the plan
     #stopped = false;
@@ -342,10 +486,14 @@ class Plan {
      */
     #parent;
 
+    /**
+     * @param { PlanBase } parent
+     */
     constructor ( parent ) {
         this.#parent = parent;
     }
 
+    /** @type { function(...any): void } */
     log ( ...args ) {
         if ( this.#parent && this.#parent.log )
             this.#parent.log( '\t', ...args )
@@ -354,39 +502,63 @@ class Plan {
     }
 
     // this is an array of sub intention. Multiple ones could eventually being achieved in parallel.
+    /** @type { IntentionDeliberation [] } */
     #sub_intentions = [];
 
+    /**
+     * @param { [string, ...any] } predicate 
+     * @returns { Promise<boolean> }
+     */
     async subIntention ( predicate ) {
-        const sub_intention = new Intention( this, predicate );
+        const sub_intention = new IntentionDeliberation( this, predicate );
         this.#sub_intentions.push( sub_intention );
         return sub_intention.achieve();
     }
 
 }
 
-class GoPickUp extends Plan {
+/**
+ * @implements { Plan }
+ */
+class GoPickUp extends PlanBase {
 
+    /**
+     * @type { function( string, ...any ) : boolean } 
+     */
     static isApplicableTo ( go_pick_up, x, y, id ) {
         return go_pick_up == 'go_pick_up';
     }
 
+    /**
+     * @type { function( string, ...any ) : Promise<boolean> } 
+     */
     async execute ( go_pick_up, x, y ) {
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         await this.subIntention( ['go_to', x, y] );
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
-        await client.emitPickup()
+        await socket.emitPickup()
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         return true;
     }
 
 }
 
-class BlindMove extends Plan {
+/**
+ * @implements { Plan }
+ * @extends { PlanBase }
+ */
+class BlindMove extends PlanBase {
 
+    /**
+     * @type { function( string, ...any ) : boolean } 
+     */
     static isApplicableTo ( go_to, x, y ) {
         return go_to == 'go_to';
     }
 
+    /**
+     * @type { function( string, ...any ) : Promise<boolean> } 
+     */
     async execute ( go_to, x, y ) {
 
         while ( me.x != x || me.y != y ) {
@@ -398,11 +570,11 @@ class BlindMove extends Plan {
             
             // this.log('me', me, 'xy', x, y);
 
-            if ( x > me.x )
-                moved_horizontally = await client.emitMove('right')
+            if ( me.x && x > me.x )
+                moved_horizontally = await socket.emitMove('right')
                 // status_x = await this.subIntention( 'go_to', {x: me.x+1, y: me.y} );
-            else if ( x < me.x )
-                moved_horizontally = await client.emitMove('left')
+            else if ( me.x && x < me.x )
+                moved_horizontally = await socket.emitMove('left')
                 // status_x = await this.subIntention( 'go_to', {x: me.x-1, y: me.y} );
 
             if (moved_horizontally) {
@@ -412,11 +584,11 @@ class BlindMove extends Plan {
 
             if ( this.stopped ) throw ['stopped']; // if stopped then quit
 
-            if ( y > me.y )
-                moved_vertically = await client.emitMove('up')
+            if ( me.y && y > me.y )
+                moved_vertically = await socket.emitMove('up')
                 // status_x = await this.subIntention( 'go_to', {x: me.x, y: me.y+1} );
-            else if ( y < me.y )
-                moved_vertically = await client.emitMove('down')
+            else if ( me.y && y < me.y )
+                moved_vertically = await socket.emitMove('down')
                 // status_x = await this.subIntention( 'go_to', {x: me.x, y: me.y-1} );
 
             if (moved_vertically) {
@@ -438,6 +610,41 @@ class BlindMove extends Plan {
     }
 }
 
+class GoToDropoff extends PlanBase {
+
+    static isApplicableTo ( go_to_dropoff, x, y ) {
+        return go_to_dropoff == 'go_to_dropoff';
+    }
+
+    async execute ( go_to_dropoff, x, y ) {
+
+        if ( this.stopped ) throw ['stopped']; // if stopped then quit
+        await this.subIntention( ['go_to', x, y] );
+        if ( this.stopped ) throw ['stopped'];
+        await socket.emitPutdown();
+        return true;
+    }
+
+}
+
+class GoToDiscover extends PlanBase {
+
+    static isApplicableTo ( go_to_discover, x, y ) {
+        return go_to_discover == 'go_to_discover';
+    }
+
+    async execute ( go_to_discover, x, y ) {
+
+        if ( this.stopped ) throw ['stopped']; // if stopped then quit
+        await this.subIntention( ['go_to', x, y] );
+        if ( this.stopped ) throw ['stopped'];
+        return true;
+    }
+
+}
+
 // plan classes are added to plan library 
 planLibrary.push( GoPickUp )
 planLibrary.push( BlindMove )
+planLibrary.push( GoToDropoff )
+planLibrary.push( GoToDiscover )
