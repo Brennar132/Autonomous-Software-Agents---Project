@@ -16,6 +16,7 @@ function distance( {x:x1, y:y1}, {x:x2, y:y2}) {
 /**
  * @type {Map<x,Map<y,{x,y,delivery}>}
  */
+
 const map = new Map()
 
 client.onTile( ( x, y, delivery ) => {
