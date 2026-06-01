@@ -79,8 +79,10 @@ socket.onTile(({x, y, type}) => {
 
 function key(x, y) { return `${x}_${y}`; }
 
+
 const dynamicObstacles = new Map();
 
+// We set a dynamic obstacle on the tile where we got blocked, so to avoid trying the same move multiple times while the other bot is still there
 function setDynamicObstacle(x, y, duration = 1500) {
     const k = key(x, y);
 
@@ -93,6 +95,7 @@ function setDynamicObstacle(x, y, duration = 1500) {
 
 const blacklistedParcels = new Map();
 
+// When a parcel is blacklisted, it means that we consider it temporarily unreachable 
 function blacklistParcel(id, duration = 5000) {
     blacklistedParcels.set(id, true);
     setTimeout(() => blacklistedParcels.delete(id), duration);
@@ -164,15 +167,7 @@ function aStar(start, goal) {
             if (closed.has(neighborKey)){
                 continue;
             }
-
-            const isGoal = neighbor.x === goal.x && neighbor.y === goal.y;
-            if (!isGoal && !isWalkable(neighbor.x, neighbor.y)){
-                continue;
-            }
-
-            if (!isWalkable(neighbor.x, neighbor.y)){
-                continue;
-            }
+            if (!isWalkable(neighbor.x, neighbor.y) && !(neighbor.x === goal.x && neighbor.y === goal.y)) continue;
 
             if (!gScore.has(neighborKey) || tentativeG < gScore.get(neighborKey)) {
                 cameFrom.set(neighborKey, current);
@@ -227,95 +222,159 @@ function optionsGeneration () {
     const options = []
 
     const carrying = Array.from(parcels.values()).filter( p => p.carriedBy == me.id );
-    if ( carrying.length > 0 ) { //Needs to be revised
+    
+    const currentIntention = myAgent.intention_queue[0];
+    let currentTarget = null;
+    if (currentIntention) {
+        const [, currX, currY] = currentIntention.predicate;
+        currentTarget = { x: currX, y: currY };
+    }
+    
+    if ( carrying.length > 0 ) { // Needs to be revised
         for ( const dropoff of dropoffs.values() ) {
             options.push( [ 'go_to_dropoff', dropoff.x, dropoff.y ] );
             // myAgent.push( [ 'go_to_dropoff', dropoff.x, dropoff.y ] )
         }
     }
 
-
-
-    for (const parcel of parcels.values())
-        if ( ! parcel.carriedBy && !blacklistedParcels.has(parcel.id) ) {
-            options.push( [ 'go_pick_up', parcel.x, parcel.y, parcel.id ] );
-            // myAgent.push( [ 'go_pick_up', parcel.x, parcel.y, parcel.id ] )
+    if (carrying.length < 3) {
+        for (const parcel of parcels.values()) {
+            if ( !parcel.carriedBy && !blacklistedParcels.has(parcel.id) ) {
+                options.push( [ 'go_pick_up', parcel.x, parcel.y, parcel.id, parcel.reward ] );
+            }
         }
+    }
     /**
      * Options filtering
      */
 
     if (carrying.length === 0) {
-        const hasFreeParcels = Array.from(parcels.values()).some(p => !p.carriedBy);
 
-        if (!hasFreeParcels) {
+    const hasFreeParcels =
+        Array.from(parcels.values())
+        .some(p => !p.carriedBy);
+
+    if (!hasFreeParcels) {
+
+        // Reconsider exploration only occasionally
+        if (
+            Date.now() - lastExplorationUpdate
+            > EXPLORATION_RECONSIDER_MS
+        ) {
+
             const exploreTarget = getExploreTarget();
+
             if (exploreTarget) {
-                options.push(['go_to_discover', exploreTarget.x, exploreTarget.y]);
-                // console.log('No free parcels, exploring:', exploreTarget);
+
+                options.push([
+                    'go_to_discover',
+                    exploreTarget.x,
+                    exploreTarget.y
+                ]);
+
+                lastExplorationUpdate = Date.now();
             }
-        }
-    }
-
-    let best_option;
-    let nearest = Number.MAX_VALUE;
-   for (const option of options) {
-
-        let [, x, y] = option;
-        let current_d = distance({x, y}, me);
-
-        if (carrying.length > 0) {
-            if (option[0] !== 'go_to_dropoff') continue;
-        } else {
-            if (option[0] !== 'go_pick_up' && option[0] !== 'go_to_discover') continue;
-        }
-
-        if (current_d < nearest) {
-            best_option = option;
-            nearest = current_d;
-        }
-
-    }
-
-    /**
-     * Best option is selected
-     */
-    if (best_option) {
-        const isUrgent = best_option[0] === 'go_pick_up' || best_option[0] === 'go_to_dropoff';
-        
-        // Comprobar si ya tenemos exactamente este plan o destino en cola para no spamear
-        const currentIntention = myAgent.intention_queue[0];
-        if (currentIntention) {
-            const [, currX, currY] = currentIntention.predicate;
-            const [, nextX, nextY] = best_option;
-            if (currX === nextX && currY === nextY && !currentIntention.stopped) {
-                return; // Ya vamos hacia allá, no interrumpas el plan.
-            }
-        }
-
-        if (isUrgent || myAgent.intention_queue.length === 0) {
-            myAgent.push(best_option);
         }
     }
 }
 
-function getExploreTarget() {
-    // 1. intenta tiles conocidos pero lejanos
-    let candidates = Array.from(tileMap.values());
+    let best_option = null;
+    let maxUtility = -Number.MAX_VALUE;
+    for (const option of options) {
+        const [type, x, y, id, reward] = option;
+        let utility = 0;
 
-    if (candidates.length > 0) {
-        return candidates[Math.floor(Math.random() * candidates.length)];
+        if (carrying.length > 0) {
+            if (type === 'go_to_dropoff') {
+                // Utility of drop-off is inversely proportional to distance
+                utility = 200 - distance(me, {x, y});
+            } 
+            else if (type === 'go_pick_up' && currentTarget) {
+                // Evaluation of pick-up opportunity
+                const dMeToParcel = distance(me, {x, y});
+                const dParcelToTarget = distance({x, y}, currentTarget);
+                const dMeToTarget = distance(me, currentTarget);
+
+                // Calculus of marginal distance (deviation cost)
+                const marginalDistance = dMeToParcel + dParcelToTarget - dMeToTarget;
+                
+                // Can be tuned for better performance
+                const alpha = 20; // Factor of reward importance (how much we value the reward of the new parcel)
+                const beta = 15;  // Cost of deviation (opportunity cost)
+
+                // Utility is calculated as the reward minus the cost of deviation
+                utility = (reward * alpha) - (marginalDistance * beta);
+
+                // If the marginal distance is too high ignore
+                if (marginalDistance > 6) continue;
+            } else {
+                continue;
+            }
+        } else {
+            // Prioritizing pick-ups when not carrying anything in function of reward/distance, then exploration
+            if (type !== 'go_pick_up' && type !== 'go_to_discover') continue;
+            
+            if (type === 'go_pick_up') {
+                utility = (reward * 25) - distance(me, {x, y});
+            } else {
+                utility = 100 - distance(me, {x, y}); // Exploration utility
+            }
+        }
+
+        if (utility > maxUtility) {
+            maxUtility = utility;
+            best_option = option;
+        }
     }
+    /**
+     * Best option is selected
+     */
+    if (best_option) {
+        // If the best option is the same as the current intention, do nothing
+        if (currentTarget && best_option[1] === currentTarget.x && best_option[2] === currentTarget.y) {
+            return; 
+        }
 
-    // 2. fallback: moverse random cerca
-    const dirs = [
-        {x: me.x + 1, y: me.y},
-        {x: me.x - 1, y: me.y},
-        {x: me.x, y: me.y + 1},
-        {x: me.x, y: me.y - 1}
-    ];
+        // If we are going to dropoff but want to pick up a package, prioritize the new pick-up intention
+        myAgent.push(best_option);
+    }
+}
 
-    return dirs[Math.floor(Math.random() * dirs.length)];
+const recentlyVisited = new Map(); // key → timestamp
+let lastExplorationUpdate = 0;
+const EXPLORATION_RECONSIDER_MS = 3000; // 3 seconds
+
+socket.onYou(() => {
+    const k = key(me.x, me.y);
+    recentlyVisited.set(k, Date.now());
+    // Expire after 30s
+    for (const [k, t] of recentlyVisited)
+        if (Date.now() - t > 30000) recentlyVisited.delete(k);
+});
+
+function getExploreTarget() {
+    const now = Date.now();
+    const STALE_THRESHOLD = 15000;
+
+    // Prefer spawn points not recently visited
+    const freshSpawns = Array.from(spawnPoints.values()).filter(t => {
+        const t_visited = recentlyVisited.get(key(t.x, t.y));
+        return !t_visited || (now - t_visited > STALE_THRESHOLD);
+    });
+
+    if (freshSpawns.length > 0)
+        return freshSpawns[Math.floor(Math.random() * freshSpawns.length)];
+
+    // Fall back to any walkable tile not recently visited
+    const fresh = Array.from(tileMap.values()).filter(t =>
+        t.type !== "0" && (!recentlyVisited.has(key(t.x, t.y)) ||
+        now - recentlyVisited.get(key(t.x, t.y)) > STALE_THRESHOLD)
+    );
+
+    if (fresh.length > 0)
+        return fresh[Math.floor(Math.random() * fresh.length)];
+
+    return null;
 }
 
 /**
@@ -349,53 +408,37 @@ class IntentionRevision {
         return this.#intention_queue;
     }
 
-    async loop ( ) {
-        while ( true ) {
-            // Consumes intention_queue if not empty
-            if ( this.intention_queue.length > 0 ) {
-                console.log( 'intentionRevision.loop', this.intention_queue.map(i=>i.predicate) );
-            
-                // Current intention
-                const intention = this.intention_queue[0];
-                
-                // Is queued intention still valid? Do I still want to achieve it?
-                // TODO this hard-coded implementation is an example
-                let id = intention.predicate[2]
-                let p = parcels.get(id)
-                if ( p && p.carriedBy ) {
-                    console.log( 'Skipping intention because no more valid', intention.predicate )
-                    this.intention_queue.shift();
-                    continue;
-                }
+async loop() {
+    while (true) {
 
-                // Start achieving intention
-                await intention.achieve()
-                // Catch eventual error and continue
-                .catch( async (error) => {
-                   console.log( 'Failed intention', ...intention.predicate, 'with error:', error );
-                    
-                    let id = intention.predicate[3]; // El ID del paquete en ['go_pick_up', x, y, id]
-                    if (id && (error.includes('unreachable') || error.includes('blocked'))) {
-                        console.log(`Penalizing parcel ${id} for 5 seconds.`);
-                        blacklistParcel(id, 5000);
-                    }
+        if (this.intention_queue.length > 0) {
 
-                   // If the intention fails we force the generation of new options
-                   this.#intention_queue = []; 
+            const intention = this.intention_queue[0];
 
-                   await new Promise(res => setTimeout(res, 50));
+            console.log(
+                "intentionRevision.loop",
+                this.intention_queue.map(i => i.predicate)
+            );
 
-                   optionsGeneration();
-                } );
-
-                if (this.intention_queue.length > 0) {
+            try {
+                await intention.achieve();
+            } catch (error) {
+                console.log(
+                    "Failed intention",
+                    intention.predicate,
+                    "with error:",
+                    error
+                );
+            } finally {
+                if (intention.stopped) {
                     this.intention_queue.shift();
                 }
-            }else{
-                await new Promise(res => setTimeout(res, 100));
             }
         }
+
+        await new Promise(res => setTimeout(res, 50));
     }
+}
 
     // async push ( predicate ) { }
 
@@ -440,18 +483,26 @@ class IntentionRevisionReplace extends IntentionRevision {
      * @param { [string, ...any] } predicate is in the form ['go_to', x, y]
      */
     async push ( predicate ) {
-
-        // Check if already queued
+        const current = this.intention_queue[0];
         const last = this.intention_queue.at( this.intention_queue.length - 1 );
-        if ( last && last.predicate.join(' ') == predicate.join(' ') ) {
-            return; // intention is already being achieved
+        
+        // If the new intention is the same as the current or last one, do nothing
+        if ( last && last.predicate.slice(0,3).join(' ') == predicate.slice(0,3).join(' ') ) {
+            return; 
+        }
+
+        // If we are going to dropoff but want to pick up a package, unshift the new intention
+        if (current && current.predicate[0] === 'go_to_dropoff' && predicate[0] === 'go_pick_up') {
+            const intention = new IntentionDeliberation( this, predicate );
+            this.intention_queue.unshift( intention ); // Prioritize the new pick-up intention
+            current.stop(); // Stop the dropoff journey temporarily
+            return;
         }
         
-        console.log( 'IntentionRevisionReplace.push', predicate );
+        // Replace current intention with the new one, stopping the current one if exists
         const intention = new IntentionDeliberation( this, predicate );
         this.intention_queue.push( intention );
         
-        // Force current intention stop 
         if ( last ) {
             last.stop();
         }
@@ -478,10 +529,6 @@ class IntentionRevisionRevise extends IntentionRevision {
  * Start intention revision loop
  */
 
-// const myAgent = new IntentionRevisionQueue();
-const myAgent = new IntentionRevisionReplace();
-// const myAgent = new IntentionRevisionRevise();
-myAgent.loop();
 
 
 
@@ -704,10 +751,10 @@ class AStarMove extends PlanBase {
 
         const goal = {x, y};
         let retries = 0;
-        const MAX_RETRIES = 5;
+        const MAX_RETRIES = 5; // Max retries before giving up and considering the goal unreachable
 
         const startTime = Date.now();
-        const TIMEOUT = 10000; // 10s hard limit
+        const TIMEOUT = 10000; // Max time to spend trying to reach the goal before giving up
 
         while (me.x !== x || me.y !== y) {
 
@@ -745,7 +792,7 @@ class AStarMove extends PlanBase {
 
             let pathBroken = false;
 
-            // Sigue el camino paso a paso hasta que sea necesario recalcular
+            // Follow the path step by step, checking for dynamic obstacles and blockages
             for (let i = 1; i < path.length; i++) {
                 if (this.stopped){
                     throw ['stopped'];
@@ -759,7 +806,7 @@ class AStarMove extends PlanBase {
                 else if (next.y > me.y) moved = await move('up');
                 else if (next.y < me.y) moved = await move('down');
 
-                if (this.stopped) throw ['stopped']; // parado durante el await
+                if (this.stopped) throw ['stopped'];
 
                 if (moved) {
                     retries = 0;
@@ -767,7 +814,7 @@ class AStarMove extends PlanBase {
                 } else {
                     retries++;
 
-                    // marcar tile bloqueado temporalmente
+                    // Set dynamic obstacle on the tile
                     setDynamicObstacle(next.x, next.y, 2000);
 
                     this.log('Blocked at:', next.x, next.y);
@@ -776,7 +823,7 @@ class AStarMove extends PlanBase {
                         throw ['too many blocked attempts'];
                     }
 
-                    // esperar un poco antes de recalcular
+                    // Waiting before recalculating path
                     await new Promise(res => setTimeout(res, 150));
 
                     this.log('Move blocked, recalculating path...');
@@ -787,6 +834,7 @@ class AStarMove extends PlanBase {
             if (this.stopped){
                 throw ['stopped'];
             }
+            // If the path is not broken and the destination is not reached
             if (!pathBroken && (me.x !== x || me.y !== y)) {
                 await new Promise(res => setTimeout(res, 50));
             }
@@ -845,3 +893,6 @@ planLibrary.push( GoPickUp )
 planLibrary.push( AStarMove )
 planLibrary.push( GoToDropoff )
 planLibrary.push( GoToDiscover )
+
+const myAgent = new IntentionRevisionReplace();
+myAgent.loop();
