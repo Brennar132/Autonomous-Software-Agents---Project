@@ -64,17 +64,26 @@ const dropoffs = new Map();
 const spawnPoints = new Map();
 
 socket.onTile(({x, y, type}) => {
-    const key = `${x}_${y}`;
-    tileMap.set(key, {x, y, type});
-    if (type == "1") {
-        spawnPoints.set(key, {x, y, type});
-        console.log('spawn point found!:', {x, y});
-    }
-    if (type == "2") {
-        dropoffs.set(key, {x, y, type});
-        console.log('Dropoff:', {x, y});
-    }
+    const k = key(x, y);
+    const oldTile = tileMap.get(k);
 
+    // Only print if this is a NEW tile or the TYPE has changed
+    if (!oldTile || oldTile.type !== type) {
+        
+        // If it was a box (5!) and now it's empty (5), or vice versa
+        if (oldTile) {
+            console.log(`[MAP UPDATE] Tile ${x},${y} changed: ${oldTile.type} -> ${type}`);
+        } else {
+            console.log(`[MAP DISCOVERY] New tile found at ${x},${y}: type ${type}`);
+        }
+
+        // Update the map
+        tileMap.set(k, {x, y, type});
+        
+        // Special case: update dropoffs or spawn points if they are discovered
+        if (type == "1") spawnPoints.set(k, {x, y, type});
+        if (type == "2") dropoffs.set(k, {x, y, type});
+    }
 });
 
 function key(x, y) { return `${x}_${y}`; }
@@ -102,24 +111,48 @@ function blacklistParcel(id, duration = 5000) {
 }
 
 function isWalkable(x, y) {
-
-    if (x < 0 || y < 0){
+    if (x < 0 || y < 0) {
         return false;
     }
 
     const k = key(x, y);
 
-    if (dynamicObstacles.has(k)){
+    if (dynamicObstacles.has(k)) {
         return false;
     }
 
     const tile = tileMap.get(k);
 
-    if (!tile){
+    // If tile is unknown, assume it's walkable (or change to false if map boundaries are strict)
+    if (!tile) {
         return true;
     }
 
-    return tile.type != "0";
+    // Type "0" is a hard wall or 
+    if (tile.type == "0") {
+        return false;
+    }
+
+    // Type "5" is a box
+    if (tile.type == "5!") {
+        return false;
+    }
+
+    return true;
+}
+
+function MoveIsAllowed(fromTile, toTile) {
+   if(!fromTile || !toTile) return true;
+
+   const dx = toTile.x - fromTile.x;
+   const dy = toTile.y - fromTile.y;
+
+   if (toTile.type === '↑' && dy !== -1) return false;
+   if (toTile.type === '↓' && dy !== 1)  return false;
+   if (toTile.type === '←' && dx !== -1) return false;
+   if (toTile.type === '→' && dx !== 1)  return false;
+   
+   return true;
 }
 
 function heuristic({x: x1, y: y1}, {x: x2, y: y2}) {
@@ -167,7 +200,18 @@ function aStar(start, goal) {
             if (closed.has(neighborKey)){
                 continue;
             }
-            if (!isWalkable(neighbor.x, neighbor.y) && !(neighbor.x === goal.x && neighbor.y === goal.y)) continue;
+
+            const isGoal = (neighbor.x === goal.x && neighbor.y === goal.y);
+            if (!isWalkable(neighbor.x, neighbor.y) && !isGoal) {
+                continue;
+            }
+
+            const currentTile = tileMap.get(currentKey);
+            const neighborTile = tileMap.get(neighborKey) || { x: neighbor.x, y: neighbor.y, type: '3' };
+
+            if (!MoveIsAllowed(currentTile, neighborTile) && !isGoal) {
+                continue;
+            }
 
             if (!gScore.has(neighborKey) || tentativeG < gScore.get(neighborKey)) {
                 cameFrom.set(neighborKey, current);
@@ -487,6 +531,10 @@ class IntentionRevisionReplace extends IntentionRevision {
         const current = this.intention_queue[0];
         const last = this.intention_queue.at( this.intention_queue.length - 1 );
         
+        if (current && current.predicate[0] === predicate[0] && current.predicate[1] === predicate[1] && current.predicate[2] === predicate[2]) {
+            return;
+        }
+
         // If the new intention is the same as the current or last one, do nothing
         if ( last && last.predicate.slice(0,3).join(' ') == predicate.slice(0,3).join(' ') ) {
             return; 
@@ -896,4 +944,7 @@ planLibrary.push( GoToDropoff )
 planLibrary.push( GoToDiscover )
 
 const myAgent = new IntentionRevisionReplace();
-myAgent.loop();
+(async () => {
+    console.log("Starting Agent Loop...");
+    await myAgent.loop();
+})();
