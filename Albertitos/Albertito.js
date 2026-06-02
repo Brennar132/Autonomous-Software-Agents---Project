@@ -48,12 +48,6 @@ socket.onSensing( async ( sensing ) => { // Update parcels information Delete/Ad
     }
 } )
 
-socket.onSensing( async ( sensing ) => { // Log sensing information
-    for (const p of sensing.positions) {
-        //console.log( 'Position:', p );
-    
-    }
-} );
 //------------------------Adding TIle Information------------------------
 /**
  * @type { Map< string, {x:number, y:number, type:string} > }
@@ -266,6 +260,8 @@ function optionsGeneration () {
     const options = []
 
     const carrying = Array.from(parcels.values()).filter( p => p.carriedBy == me.id );
+    const totalCarryingReward = carrying.reduce( (sum, p) => sum + p.reward, 0 );
+    const nearest = nearestDropoff();
     
     const currentIntention = myAgent.intention_queue[0];
     let currentTarget = null;
@@ -331,16 +327,18 @@ function optionsGeneration () {
         if (carrying.length > 0) {
             if (type === 'go_to_dropoff') {
                 // Utility of drop-off is inversely proportional to distance
-                utility = 200 - distance(me, {x, y});
+                utility = (totalCarryingReward * 8) - distance(me, {x, y});
             } 
-            else if (type === 'go_pick_up' && currentTarget) {
+            else if (type === 'go_pick_up' && nearest) {
                 // Evaluation of pick-up opportunity
                 const dMeToParcel = distance(me, {x, y});
-                const dParcelToTarget = distance({x, y}, currentTarget);
-                const dMeToTarget = distance(me, currentTarget);
+                const dParcelToDrop = distance({x, y}, nearest);
+                const dMeToDrop = distance(me, nearest);
 
                 // Calculus of marginal distance (deviation cost)
-                const marginalDistance = dMeToParcel + dParcelToTarget - dMeToTarget;
+                const marginalDistance = dMeToParcel + dParcelToDrop - dMeToDrop;
+
+                if (marginalDistance > 6) continue;
                 
                 // Can be tuned for better performance
                 const alpha = 20; // Factor of reward importance (how much we value the reward of the new parcel)
@@ -348,9 +346,7 @@ function optionsGeneration () {
 
                 // Utility is calculated as the reward minus the cost of deviation
                 utility = (reward * alpha) - (marginalDistance * beta);
-
-                // If the marginal distance is too high ignore
-                if (marginalDistance > 6) continue;
+                
             } else {
                 continue;
             }
@@ -383,6 +379,20 @@ function optionsGeneration () {
         myAgent.push(best_option);
     }
 }
+
+// Cancel active go_pick_up if the target parcel was taken by someone else
+socket.onSensing(() => {
+    const current = myAgent.intention_queue[0];
+    if (!current) return;
+    const [type, , , id] = current.predicate;
+    if (type === 'go_pick_up' && id) {
+        const p = parcels.get(id);
+        if (!p || p.carriedBy) {
+            console.log('[CANCEL] Parcel', id, 'no longer free — aborting chase');
+            current.stop();
+        }
+    }
+});
 
 const recentlyVisited = new Map(); // key → timestamp
 let lastExplorationUpdate = 0;
@@ -424,8 +434,12 @@ function getExploreTarget() {
 /**
  * Generate options at every sensing event
  */
-socket.onSensing( optionsGeneration )
-socket.onYou( optionsGeneration )
+//Make Albertito a little bit lazier 
+setInterval(() => {
+    if (me.id) {
+        optionsGeneration();
+    }
+}, 350);
 
 // /**
 //  * Alternatively, generate options continuously
@@ -454,30 +468,18 @@ class IntentionRevision {
 
 async loop() {
     while (true) {
-
         if (this.intention_queue.length > 0) {
-
             const intention = this.intention_queue[0];
-
-            console.log(
-                "intentionRevision.loop",
-                this.intention_queue.map(i => i.predicate)
+            console.log("intentionRevision.loop", this.intention_queue.map(i => i.predicate)
             );
             let success = false;
             try {
                 await intention.achieve();
                 success = true;
             } catch (error) {
-                console.log(
-                    "Failed intention",
-                    intention.predicate,
-                    "with error:",
-                    error
-                );
+                console.log("Failed intention", intention.predicate, "with error:", error);
             } finally {
-                if (success || intention.stopped) {
-                    this.intention_queue.shift();
-                }
+                this.intention_queue.shift();
             }
         }
 
@@ -762,25 +764,30 @@ class PlanBase {
  */
 class GoPickUp extends PlanBase {
 
-    /**
-     * @type { function( string, ...any ) : boolean } 
-     */
     static isApplicableTo ( go_pick_up, x, y, id ) {
         return go_pick_up == 'go_pick_up';
     }
 
-    /**
-     * @type { function( string, ...any ) : Promise<boolean> } 
-     */
-    async execute ( go_pick_up, x, y ) {
-        if ( this.stopped ) throw ['stopped']; // if stopped then quit
-        await this.subIntention( ['go_to', x, y] );
-        if ( this.stopped ) throw ['stopped']; // if stopped then quit
-        await socket.emitPickup()
-        if ( this.stopped ) throw ['stopped']; // if stopped then quit
+    async execute ( go_pick_up, x, y, id ) {
+        if ( this.stopped ) throw ['stopped'];
+
+        // Abort immediately if already taken or gone
+        const parcel = parcels.get(id);
+        if ( !parcel || parcel.carriedBy ) throw ['parcel no longer available', id];
+
+        try {
+            await this.subIntention( ['go_to', x, y] );
+        } catch (err) {
+            // Navigation failed: temporarily blacklist so we don't keep chasing it
+            if ( id && !this.stopped ) blacklistParcel(id, 8000);
+            throw err;
+        }
+
+        if ( this.stopped ) throw ['stopped'];
+        await socket.emitPickup();
+        if ( this.stopped ) throw ['stopped'];
         return true;
     }
-
 }
 
 /**
