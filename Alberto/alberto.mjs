@@ -216,6 +216,18 @@ async function getSpawnPoints() {
   }
   return JSON.stringify([...spawnPoints.values()]);
 }
+
+async function pickUp() {
+  console.log("---- PICK UP ----");
+  try {
+    const result = await socket.emitPickup();  // check exact SDK name
+    if (result) return `Picked up parcel successfully: ${JSON.stringify(result)}`;
+    return "Error: pickup failed — no parcel at current position.";
+  } catch (error) {
+    return `Error: pickup failed: ${error.message}`;  // never crash the process
+  }
+}
+
 const TOOLS = {
   calculate,
   get_current_time: getCurrentTime,
@@ -223,7 +235,8 @@ const TOOLS = {
   move,
   get_tile: getTile,
   get_dropoffs: getDropoffs,
-  get_spawn_points: getSpawnPoints
+  get_spawn_points: getSpawnPoints,
+  pick_up: pickUp
 };
 
 // ==========================================
@@ -327,6 +340,7 @@ Movement rules:
 - if the user asks for the current or final position, include a get_my_position step
 - if the user asks to move relative to the current position, first include a get_my_position step
 
+
 Rules:
 - Return ONLY valid JSON.
 - Do not use markdown.
@@ -338,7 +352,7 @@ Rules:
 - If the user asks where the agent is, include a step that uses get_my_position.
 - If the user asks to move the agent, include one move step for each single movement.
 - If the user asks for the final position after moving, include a final get_my_position step.
-
+- pickUp is also a valid action to include in the plan, it picks up a parcel if the agent is on a spawn point
 Return exactly this JSON shape:
 
 {
@@ -362,6 +376,7 @@ Available tools:
 - get_tile(x,y): returns the tile type at coordinates x,y (input format: "x,y")
 - get_dropoffs(): returns all known delivery/dropoff zone coordinates
 - get_spawn_points(): returns all known parcel spawn point coordinates
+- pick_up(): picks up a parcel if the agent is currently on a spawn point
 
 Movement rules:
 - move(up) increases y by 1
@@ -413,6 +428,7 @@ Rules:
 - If the current step requires dropoff locations, call get_dropoffs.
 - If the current step requires spawn point locations, call get_spawn_points.
 - If the current step requires tile info at a position, call get_tile.
+- If the current step requires picking up a parcel, call pick_up.
 `.trim();
 
 const FINAL_ANSWER_PROMPT = `
