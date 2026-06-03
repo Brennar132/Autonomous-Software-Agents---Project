@@ -228,6 +228,17 @@ async function pickUp() {
   }
 }
 
+async function deliverParcel() {
+  console.log("---- DELIVER PARCEL ----");
+  try {
+    const result = await socket.emitDeliver();  // check exact SDK name
+    if (result) return `Delivered parcel successfully: ${JSON.stringify(result)}`;
+    return "Error: delivery failed — not at dropoff point or no parcel to deliver.";
+  } catch (error) {
+    return `Error: delivery failed: ${error.message}`;  // never crash the process
+  }
+}
+
 const TOOLS = {
   calculate,
   get_current_time: getCurrentTime,
@@ -236,7 +247,8 @@ const TOOLS = {
   get_tile: getTile,
   get_dropoffs: getDropoffs,
   get_spawn_points: getSpawnPoints,
-  pick_up: pickUp
+  pick_up: pickUp,
+  deliver_parcel: deliverParcel
 };
 
 // ==========================================
@@ -329,6 +341,8 @@ Available tools:
 - get_tile(x,y): returns the type of tile at coordinates x,y
 - get_dropoffs(): returns a list of known dropoff points with their coordinates
 - get_spawn_points(): returns a list of known spawn points with their coordinates
+- pick_up(): picks up a parcel if the agent is currently on a spawn point
+- deliver_parcel(): delivers a parcel if the agent is currently on a dropoff point
 
 Movement rules:
 - move(up) increases y by 1
@@ -353,6 +367,7 @@ Rules:
 - If the user asks to move the agent, include one move step for each single movement.
 - If the user asks for the final position after moving, include a final get_my_position step.
 - pickUp is also a valid action to include in the plan, it picks up a parcel if the agent is on a spawn point
+- deliver_parcel is also a valid action to include in the plan, it delivers a parcel if the agent is on a dropoff point
 Return exactly this JSON shape:
 
 {
@@ -429,6 +444,7 @@ Rules:
 - If the current step requires spawn point locations, call get_spawn_points.
 - If the current step requires tile info at a position, call get_tile.
 - If the current step requires picking up a parcel, call pick_up.
+- If the current step requires delivering a parcel, call deliver_parcel.
 `.trim();
 
 const FINAL_ANSWER_PROMPT = `
