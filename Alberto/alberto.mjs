@@ -56,6 +56,42 @@ socket.onYou((you) => {
   me.score = you.score;
 });
 
+
+// ==========================================
+// 2C. Listeners
+// ==========================================
+
+/**
+ * @type { Map< string, {x:number, y:number, type:string} > }
+ */
+
+const tileMap = new Map();
+const dropoffs = new Map(); 
+const spawnPoints = new Map();
+function key(x, y) { return `${x}_${y}`; }
+socket.onTile(({x, y, type}) => {
+    const k = key(x, y);
+    const oldTile = tileMap.get(k);
+
+    // Only print if this is a NEW tile or the TYPE has changed
+    if (!oldTile || oldTile.type !== type) {
+        
+        // If it was a box (5!) and now it's empty (5), or vice versa
+        if (oldTile) {
+            console.log(`[MAP UPDATE] Tile ${x},${y} changed: ${oldTile.type} -> ${type}`);
+        } else {
+            console.log(`[MAP DISCOVERY] New tile found at ${x},${y}: type ${type}`);
+        }
+
+        // Update the map
+        tileMap.set(k, {x, y, type});
+        
+        // Special case: update dropoffs or spawn points if they are discovered
+        if (type == "1") spawnPoints.set(k, {x, y, type});
+        if (type == "2") dropoffs.set(k, {x, y, type});
+    }
+});
+
 // ==========================================
 // 3. Tools
 // ==========================================
@@ -129,6 +165,7 @@ async function getMyPosition() {
   });
 }
 
+
 async function move(direction) {
   console.log("---- MOVE ----");
 
@@ -153,11 +190,40 @@ async function move(direction) {
   }
 }
 
+
+
+//----------------Added tools----------------
+
+async function getTile(input) {
+  const [x, y] = input.split(",").map(Number);
+  const tile = tileMap.get(key(x, y));
+  return JSON.stringify(tile || { x, y, type: "unknown" });
+}
+
+
+async function getDropoffs() {
+  console.log("---- GET DROPOFFS ----");
+  if (dropoffs.size === 0) {
+    return "No dropoff zones discovered yet.";
+  }
+  return JSON.stringify([...dropoffs.values()]);
+}
+
+async function getSpawnPoints() {
+  console.log("---- GET SPAWN POINTS ----");
+  if (spawnPoints.size === 0) {
+    return "No spawn points discovered yet.";
+  }
+  return JSON.stringify([...spawnPoints.values()]);
+}
 const TOOLS = {
   calculate,
   get_current_time: getCurrentTime,
   get_my_position: getMyPosition,
   move,
+  get_tile: getTile,
+  get_dropoffs: getDropoffs,
+  get_spawn_points: getSpawnPoints
 };
 
 // ==========================================
@@ -247,6 +313,9 @@ Available tools:
 - get_current_time(location): returns the current local time for Rome/Roma
 - get_my_position(): returns the agent's current x, y coordinates and score
 - move(direction): moves the agent one step in one direction: up, down, left, or right
+- get_tile(x,y): returns the type of tile at coordinates x,y
+- get_dropoffs(): returns a list of known dropoff points with their coordinates
+- get_spawn_points(): returns a list of known spawn points with their coordinates
 
 Movement rules:
 - move(up) increases y by 1
@@ -290,6 +359,9 @@ Available tools:
 - get_current_time(location): returns the current local time for Rome/Roma
 - get_my_position(): returns the agent's current x, y coordinates and score
 - move(direction): moves the agent one step in one direction: up, down, left, or right
+- get_tile(x,y): returns the tile type at coordinates x,y (input format: "x,y")
+- get_dropoffs(): returns all known delivery/dropoff zone coordinates
+- get_spawn_points(): returns all known parcel spawn point coordinates
 
 Movement rules:
 - move(up) increases y by 1
@@ -338,6 +410,9 @@ Rules:
 - If the current step can be completed using previous step results, return Step Result directly.
 - After receiving an Observation, return a Step Result.
 - Use only the available tools.
+- If the current step requires dropoff locations, call get_dropoffs.
+- If the current step requires spawn point locations, call get_spawn_points.
+- If the current step requires tile info at a position, call get_tile.
 `.trim();
 
 const FINAL_ANSWER_PROMPT = `
