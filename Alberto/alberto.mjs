@@ -92,15 +92,31 @@ socket.onTile(({x, y, type}) => {
     }
 });
 
+
+/**
+ * @type { Map< string, {id: string, carriedBy?: string, x:number, y:number, reward:number} > }
+ */
+const parcels = new Map();
+
+socket.onSensing( async ( sensing ) => { // Update parcels information Delete/Add parcels based on sensing information
+    for (const p of sensing.parcels) {
+        parcels.set( p.id, p);
+    }
+    for ( const p of parcels.values() ) {
+        if ( sensing.parcels.map( p => p.id ).find( id => id == p.id ) == undefined ) {
+            parcels.delete( p.id );
+        }
+    }
+} )
 // ==========================================
 // 3. Tools
 // ==========================================
 
 function calculate(expression) {
   console.log("---- CALCULATE ----");
-
   try {
-    // Demo only: eval is unsafe for production
+    const min = Math.min, max = Math.max, abs = Math.abs,
+          sqrt = Math.sqrt, floor = Math.floor, ceil = Math.ceil, round = Math.round;
     return String(eval(expression));
   } catch (error) {
     return `Error: ${error.message}`;
@@ -194,6 +210,14 @@ async function move(direction) {
 
 //----------------Added tools----------------
 
+async function getVisibleParcels() {
+  console.log("---- GET VISIBLE PARCELS ----");
+  if (parcels.size === 0) {
+    return "No parcels currently detected in our known map.";
+  }
+  return JSON.stringify([...parcels.values()]);
+}
+
 async function getTile(input) {
   const [x, y] = input.split(",").map(Number);
   const tile = tileMap.get(key(x, y));
@@ -239,6 +263,34 @@ async function deliverParcel() {
   }
 }
 
+
+async function searchForParcels() {
+  console.log("---- SEARCH FOR PARCELS ----");
+
+  if (parcels.size > 0) {
+    return "There are already visible parcels. No need to search.";
+  }
+  
+  let closestSpawn = null;
+  let minDist = Infinity;
+
+  for (const spawn of spawnPoints.values()) {
+    const dist = Math.abs(spawn.x - me.x) + Math.abs(spawn.y - me.y);
+    if (dist < minDist) {
+      minDist = dist;
+      closestSpawn = spawn;
+    }
+  }
+  if (!closestSpawn) {
+    return "Error: no known spawn points to search for parcels.";
+  }
+console.log(`Searching for parcels by navigating to closest spawn point at (${closestSpawn.x}, ${closestSpawn.y})...`);
+return await navigateTo(`${closestSpawn.x},${closestSpawn.y}`);
+
+
+}
+
+
 const TOOLS = {
   calculate,
   get_current_time: getCurrentTime,
@@ -248,9 +300,179 @@ const TOOLS = {
   get_dropoffs: getDropoffs,
   get_spawn_points: getSpawnPoints,
   pick_up: pickUp,
-  deliver_parcel: deliverParcel
+  deliver_parcel: deliverParcel,
+  navigate_to: navigateTo,
+  navigate_to_closest_dropoff: navigateToClosestDropoff,
+  navigate_to_closest_spawn: navigateToClosestSpawn,
+  get_visible_parcels: getVisibleParcels,
+  search_for_parcels: searchForParcels
 };
 
+
+// ==========================================
+// 3.1 Movement Tools
+// =========================================
+function heuristic({x: x1, y: y1}, {x: x2, y: y2}) {
+    return Math.abs(Math.round(x1) - Math.round(x2)) + Math.abs(Math.round(y1) - Math.round(y2));
+}
+function aStar(start, goal) {
+    const open = [];
+    const closed = new Set();
+    
+    const cameFrom = new Map();
+    const gScore = new Map();
+    const fScore = new Map();
+
+    const startKey = key(start.x, start.y);
+    gScore.set(startKey, 0);
+    fScore.set(startKey, heuristic(start, goal));
+    open.push({x: start.x, y: start.y});
+
+    while (open.length > 0) {
+        open.sort((a, b) => fScore.get(key(a.x, a.y)) - fScore.get(key(b.x, b.y)));
+        const current = open.shift();
+        const currentKey = key(current.x, current.y);
+        closed.add(currentKey);
+
+        if (current.x === goal.x && current.y === goal.y)
+            return reconstructPath(cameFrom, current);
+
+        for (const neighbor of [
+            {x: current.x + 1, y: current.y},
+            {x: current.x - 1, y: current.y},
+            {x: current.x, y: current.y + 1},
+            {x: current.x, y: current.y - 1}
+        ]) {
+            const tentativeG = gScore.get(currentKey) + 1;
+            const neighborKey = key(neighbor.x, neighbor.y);
+
+            if (closed.has(neighborKey)){
+                continue;
+            }
+
+            const isGoal = (neighbor.x === goal.x && neighbor.y === goal.y);
+            if (!isWalkable(neighbor.x, neighbor.y) && !isGoal) {
+                continue;
+            }
+
+            const currentTile = tileMap.get(currentKey);
+            const neighborTile = tileMap.get(neighborKey) || { x: neighbor.x, y: neighbor.y, type: '3' };
+
+            if (!MoveIsAllowed(currentTile, neighborTile) && !isGoal) {
+                continue;
+            }
+
+            if (!gScore.has(neighborKey) || tentativeG < gScore.get(neighborKey)) {
+                cameFrom.set(neighborKey, current);
+                gScore.set(neighborKey, tentativeG);
+                fScore.set(neighborKey, tentativeG + heuristic(neighbor, goal));
+                if (!open.some(n => n.x === neighbor.x && n.y === neighbor.y))
+                    open.push(neighbor);
+            }
+        }
+    }
+    return null;
+}
+
+function reconstructPath(cameFrom, current) {
+    const path = [current];
+    while (cameFrom.has(key(current.x, current.y))) {
+        current = cameFrom.get(key(current.x, current.y));
+        path.push(current);
+    }
+    return path.reverse();
+}
+function MoveIsAllowed(fromTile, toTile) {
+   if(!fromTile || !toTile) return true;
+
+   const dx = toTile.x - fromTile.x;
+   const dy = toTile.y - fromTile.y;
+
+   if (toTile.type === '↑' && dy !== -1) return false;
+   if (toTile.type === '↓' && dy !== 1)  return false;
+   if (toTile.type === '←' && dx !== -1) return false;
+   if (toTile.type === '→' && dx !== 1)  return false;
+   
+   return true;
+}
+
+async function followPath(start, goal, getPosition) {
+    let path = aStar(start, goal);
+
+    while (path && path.length > 1) {
+      const from = path[0];
+      const to = path[1];
+        
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+
+      const direction = 
+      dx === 1 ? "right" :
+      dx === -1 ? "left" : 
+      dy === 1 ? "up" : "down";
+
+      const result = await move(direction);
+
+      if (result.startsWith("Error")) {
+        console.log(`Movement error: ${result}. Recalculating path...`);
+        const raw = await getPosition();
+        const current = JSON.parse(raw);
+        path = aStar(current, goal);
+      } else {
+        console.log(`Moved ${direction} to (${to.x}, ${to.y}).`);
+        path.shift();
+      }
+    }
+    return path ? `Arrived at (${goal.x}, ${goal.y}).` : "No path found.";
+}
+async function navigateTo(input) {
+  const [x, y] = input.split(",").map(Number);
+  const goal = { x, y };
+  const start = { x: me.x, y: me.y };
+  return await followPath(start, goal, getMyPosition);
+}
+function isWalkable(x, y) {
+    const key = `${x}_${y}`;
+    const tile = tileMap.get(key);
+    // Only allow tiles that are clearly marked as walkable
+    return tile && (tile.type === '1' || tile.type === '2' || tile.type === '3');
+}
+
+async function navigateToClosestDropoff(input) {
+    console.log("Navigating to closest dropoff...");
+    if (dropoffs.size === 0) return "Error: no dropoff zones discovered yet.";
+    if (me.x === null || me.y === null) return "Error: agent position is not available yet.";
+
+    let closest = null;
+    let minDist = Infinity;
+    for (const dropoff of dropoffs.values()) {
+        const dist = Math.abs(dropoff.x - me.x) + Math.abs(dropoff.y - me.y);
+        if (dist < minDist) {
+            minDist = dist;
+            closest = dropoff;
+        }
+    }
+    if (!closest) return "Error: no reachable dropoff zones found.";
+    return navigateTo(`${closest.x},${closest.y}`);
+}
+
+async function navigateToClosestSpawn(input) {
+    console.log("Navigating to closest spawn point...");
+    if (spawnPoints.size === 0) return "Error: no spawn points discovered yet.";
+    if (me.x === null || me.y === null) return "Error: agent position is not available yet.";
+
+    let closest = null;
+    let minDist = Infinity;
+    for (const spawn of spawnPoints.values()) {
+        const dist = Math.abs(spawn.x - me.x) + Math.abs(spawn.y - me.y);
+        if (dist < minDist) {
+            minDist = dist;
+            closest = spawn;
+        }
+    }
+    if (!closest) return "Error: no reachable spawn points found.";
+    return navigateTo(`${closest.x},${closest.y}`);
+}
 // ==========================================
 // 4. Reusable LLM call
 // ==========================================
@@ -343,16 +565,28 @@ Available tools:
 - get_spawn_points(): returns a list of known spawn points with their coordinates
 - pick_up(): picks up a parcel if the agent is currently on a spawn point
 - deliver_parcel(): delivers a parcel if the agent is currently on a dropoff point
+- navigate_to(x,y): moves the agent to the specified coordinates using pathfinding and returns the movement result
+- navigate_to_closest_dropoff(): navigates to the nearest known dropoff point automatically
+- navigate_to_closest_spawn(): navigates to the nearest known spawn point automatically
+- When the user asks to navigate to the "closest" dropoff or spawn, use these tools directly — no manual distance calculation needed.
+- get_visible_parcels(): returns a JSON array of all currently known or tracked parcels, including their IDs, coordinates, and rewards.
+- search_for_parcels(): automatically checks the map for unvisited or nearby spawn points and moves Alberto there to look for new parcels when none are currently visible.
+
+
 
 Movement rules:
-- move(up) increases y by 1
-- move(down) decreases y by 1
+- move(up) decreases y by 1
+- move(down) increases y by 1
 - move(right) increases x by 1
 - move(left) decreases x by 1
 - move can move only one step at a time
 - if the user asks to move multiple steps, create one move step for each movement
 - if the user asks for the current or final position, include a get_my_position step
 - if the user asks to move relative to the current position, first include a get_my_position step
+- if the user ask to move to specific coordinates, use navigate_to(x,y) instead of multiple move steps
+- navigate_to_closest_dropoff(): navigates to the nearest known dropoff point automatically
+- navigate_to_closest_spawn(): navigates to the nearest known spawn point automatically
+- When the user asks to navigate to the "closest" dropoff or spawn, use these tools directly — no manual distance calculation needed.
 
 
 Rules:
@@ -368,14 +602,19 @@ Rules:
 - If the user asks for the final position after moving, include a final get_my_position step.
 - pickUp is also a valid action to include in the plan, it picks up a parcel if the agent is on a spawn point
 - deliver_parcel is also a valid action to include in the plan, it delivers a parcel if the agent is on a dropoff point
+- If the user asks to "search for parcels", create a multi-step plan:
+  1. Use search_for_parcels() to move to an investigation zone.
+  2. Use get_visible_parcels() to look at what is on the ground.
+  3. If a parcel is present at the current position, use pick_up().
+- When the user asks to navigate to the "closest" dropoff or spawn, use these tools directly — no manual distance calculation needed.
 Return exactly this JSON shape:
-
 {
   "steps": [
     "step 1",
     "step 2"
   ]
 }
+
 `.trim();
 
 const EXECUTOR_PROMPT = `
@@ -392,14 +631,22 @@ Available tools:
 - get_dropoffs(): returns all known delivery/dropoff zone coordinates
 - get_spawn_points(): returns all known parcel spawn point coordinates
 - pick_up(): picks up a parcel if the agent is currently on a spawn point
+- deliver_parcel(): delivers a parcel if the agent is currently on a dropoff point
+- navigate_to(x,y): moves the agent to the specified coordinates using pathfinding and returns the movement result
+- navigate_to_closest_dropoff(): navigates to the nearest known dropoff point automatically
+- navigate_to_closest_spawn(): navigates to the nearest known spawn point automatically
+- When the user asks to navigate to the "closest" dropoff or spawn, use these tools directly — no manual distance calculation needed.
+-- get_visible_parcels(): returns a JSON array of all currently known or tracked parcels, including their IDs, coordinates, and rewards.
+- search_for_parcels(): automatically checks the map for unvisited or nearby spawn points and moves Alberto there to look for new parcels when none are currently visible.
 
 Movement rules:
-- move(up) increases y by 1
-- move(down) decreases y by 1
+- move(up) decreases y by 1
+- move(down) increases y by 1
 - move(right) increases x by 1
 - move(left) decreases x by 1
 - move can move only one step at a time
 - to check the current position, call get_my_position with Action Input: none
+- if the user asks to move to specific coordinates, use navigate_to(x,y) instead of multiple move steps
 
 You receive:
 - the original user request
@@ -438,16 +685,22 @@ Rules:
 - If the current step requires movement, call move.
 - If the current step does not require a tool, do not output Action.
 - If the current step can be completed using previous step results, return Step Result directly.
-- After receiving an Observation, return a Step Result.
 - Use only the available tools.
 - If the current step requires dropoff locations, call get_dropoffs.
 - If the current step requires spawn point locations, call get_spawn_points.
 - If the current step requires tile info at a position, call get_tile.
 - If the current step requires picking up a parcel, call pick_up.
 - If the current step requires delivering a parcel, call deliver_parcel.
+- If the current step requires moving to specific coordinates, use navigate_to(x,y) instead of multiple move steps.
+- After receiving an Observation, decide whether the step is truly complete.
+  If you still need to call a tool to finish the step, call it using Action/Action Input.
+  Only return a Step Result when the action has been fully executed.
+- A Step Result must describe what actually happened, not name a tool to call.
+  Writing "navigate_to(20, 2)" as a Step Result is WRONG — you must call it as an Action first.
+- A step that requires navigate_to is NOT complete until navigate_to has been called and returned a result.
 `.trim();
 
-const FINAL_ANSWER_PROMPT = `
+const FINAL_ANSWER_PROMPT = ` 
 You are the final response module of an AI agent.
 
 You receive:
