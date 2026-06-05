@@ -255,7 +255,7 @@ async function pickUp() {
 async function deliverParcel() {
   console.log("---- DELIVER PARCEL ----");
   try {
-    const result = await socket.emitDeliver();  // check exact SDK name
+    const result = await socket.emitPutdown();  // check exact SDK name
     if (result) return `Delivered parcel successfully: ${JSON.stringify(result)}`;
     return "Error: delivery failed — not at dropoff point or no parcel to deliver.";
   } catch (error) {
@@ -602,6 +602,8 @@ Rules:
 - If the user asks for the final position after moving, include a final get_my_position step.
 - pickUp is also a valid action to include in the plan, it picks up a parcel if the agent is on a spawn point
 - deliver_parcel is also a valid action to include in the plan, it delivers a parcel if the agent is on a dropoff point
+- When asked to search, pick up, and deliver, design plans that maximize efficiency.
+- If multiple parcels are likely to be found, instruct the agent to check for visible parcels, loop through picking up multiple high-reward parcels if they are nearby, and only then navigate to the closest dropoff to deliver them all.
 - If the user asks to "search for parcels", create a multi-step plan:
   1. Use search_for_parcels() to move to an investigation zone.
   2. Use get_visible_parcels() to look at what is on the ground.
@@ -698,6 +700,9 @@ Rules:
 - A Step Result must describe what actually happened, not name a tool to call.
   Writing "navigate_to(20, 2)" as a Step Result is WRONG — you must call it as an Action first.
 - A step that requires navigate_to is NOT complete until navigate_to has been called and returned a result.
+- If i ask you to deliver a parcel, you must make sure you stand on a dropoff point before calling deliver_parcel. If you are not on a dropoff point, you must navigate there first by calling navigate_to_closest_droppoff or navigate_to with the dropoff coordinates and then call deliver parcel
+- A step requiring 'pick_up()' or 'deliver_parcel()' is NOT complete until you have explicitly invoked that specific tool action and received its specific success observation. 
+- Do not assume that moving or arriving at a destination automatically executes a pickup or delivery.
 `.trim();
 
 const FINAL_ANSWER_PROMPT = ` 
