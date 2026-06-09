@@ -4,6 +4,7 @@ import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { DjsConnect } from "@unitn-asa/deliveroo-js-sdk/client";
 
+
 // ==========================================
 // 1. LiteLLM Configuration
 // ==========================================
@@ -55,6 +56,12 @@ socket.onYou((you) => {
   me.y = you.y;
   me.score = you.score;
 });
+
+import {ArgumentParser} from "argparse";
+const parser = new ArgumentParser({description: "Alberto, the Chabal"});
+parser.add_argument("--teammate-id", { help: "teammate id", required: false });
+let teamAgentId = parser.parse_args().teammate_id ?? null;
+console.log("Team agent ID set to:", teamAgentId ?? "None - we go solo!");
 
 
 // ==========================================
@@ -108,8 +115,31 @@ socket.onSensing( async ( sensing ) => { // Update parcels information Delete/Ad
         }
     }
 } )
+
+// Make Alberto a bit more verbal
+const pickupCoordination = {};
+let teamAgentId = null; // set this to the ID of your teammate agent if you want to enable communication
+
+function isPickupMsg(msg) {
+  return typeof msg === 'object' && msg !== null && msg.action === 'pickup' && 'parcelId' in msg;
+}
+
+socket.onMsg(async (id, name, msg, reply) => {  
+  if (isPickupMsg(msg)) {
+    await new Promise(r => setTimeout(r, 100)); // slight delay to ensure parcel state is updated
+    if (reply) {
+      if (pickupCoordination[msg.parcelId] === socket.id) {
+        reply(false);
+      } else {
+        pickupCoordination[msg.parcelId] = id;
+        reply(true);
+      }
+    }
+    return;
+  }
+});
 // ==========================================
-// 3. Tools
+// 3. Standard Tools
 // ==========================================
 
 function calculate(expression) {
@@ -208,7 +238,9 @@ async function move(direction) {
 
 
 
-//----------------Added tools----------------
+// ==========================================
+// 3.1 Added Tools
+// ==========================================
 
 async function getVisibleParcels() {
   console.log("---- GET VISIBLE PARCELS ----");
@@ -298,7 +330,7 @@ async function collectNearbyAndDeliver() {
 
   while (true) {
     const candidates = [...parcels.values()]
-      .filter(p => !p.carriedBy && p.reward > 0 && !processed.includes(p.id))
+      .filter(p => !p.carriedBy && p.reward > 0 && !processed.includes(p.id) && pickupCoordination[p.id] !== teamAgentId)
       .sort((a, b) => b.reward - a.reward);
 
     if (candidates.length === 0) break;
@@ -306,6 +338,16 @@ async function collectNearbyAndDeliver() {
     const target = candidates[0];
     processed.push(target.id); // mark before, so we never loop on it
 
+    //Ask friendly team mates if they are doing this pickup to avoid collisions
+    if (teamAgentId) {
+      const response = await socket.emitAsk(teamAgentId, { action: "pickup", parcelId: target.id });
+      if (!response) {
+        console.log(`Team mate declined pickup for ${target.id}`);
+        continue;
+      }
+      pickupCoordination[target.id] = socket.id; // mark it as our target to avoid future conflicts
+    }
+  
     const nav = await navigateTo(`${target.x},${target.y}`);
     if (!nav.startsWith("Arrived")) {
       console.log(`Could not reach ${target.id}: ${nav}`);
@@ -346,11 +388,12 @@ const TOOLS = {
   get_visible_parcels: getVisibleParcels,
   search_for_parcels: searchForParcels,
   collect_nearby_and_deliver: collectNearbyAndDeliver,
+  tell_team_mate: tellTeamMate,
 };
 
 
 // ==========================================
-// 3.1 Movement Tools
+// 3.2 Movement Tools
 // =========================================
 function heuristic({x: x1, y: y1}, {x: x2, y: y2}) {
     return Math.abs(Math.round(x1) - Math.round(x2)) + Math.abs(Math.round(y1) - Math.round(y2));
@@ -539,6 +582,19 @@ async function navigateToClosestSpawn(input) {
     if (!closest) return "Error: no reachable spawn points found.";
     return navigateTo(`${closest.x},${closest.y}`);
 }
+
+
+// ==========================================
+// 3.3 Communication Tools
+// ==========================================
+
+async function tellTeamMate(msg) {
+  if (!teamAgentId) return "Error: no team agent ID specified for communication.";
+  await socket.emitSay(teamAgentId, msg);
+  return "Message sent to team mate.";
+}
+
+
 // ==========================================
 // 4. Reusable LLM call
 // ==========================================
@@ -688,6 +744,7 @@ Return exactly this JSON shape:
   "collect and deliver", "search pick up deliver") MUST use exactly:
   ["search_for_parcels()", "collect_nearby_and_deliver()"]
   Never emit individual pick_up() or deliver_parcel() steps for multi-parcel collection.
+- tell_team_mate(message): sends a message to the teammate agent (use for sharing position or coordinating)
 `.trim();
 
 const EXECUTOR_PROMPT = `
@@ -713,6 +770,7 @@ Available tools:
 - search_for_parcels(): automatically checks the map for unvisited or nearby spawn points and moves Alberto there to look for new parcels when none are currently visible.
 - When the user asks to pick up parcels and deliver them, prefer the collect_nearby_and_deliver() function which will automatically pick up nearby parcels and deliver them efficiently. 
   Do not emit separate pick_up or deliver_parcel steps if collect_nearby_and_deliver() can be used.
+- tell_team_mate(message): sends a message to the teammate agent (use for sharing position or coordinating)
 
 Movement rules:
 - move(up) decreases y by 1
