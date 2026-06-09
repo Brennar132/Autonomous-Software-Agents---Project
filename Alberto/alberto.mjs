@@ -290,6 +290,45 @@ return await navigateTo(`${closestSpawn.x},${closestSpawn.y}`);
 
 }
 
+async function collectNearbyAndDeliver() {
+  console.log("---- COLLECT NEARBY PARCELS AND DELIVER ----");
+
+  const pickedUp = [];
+  const processed = [];
+
+  while (true) {
+    const candidates = [...parcels.values()]
+      .filter(p => !p.carriedBy && p.reward > 0 && !processed.includes(p.id))
+      .sort((a, b) => b.reward - a.reward);
+
+    if (candidates.length === 0) break;
+
+    const target = candidates[0];
+    processed.push(target.id); // mark before, so we never loop on it
+
+    const nav = await navigateTo(`${target.x},${target.y}`);
+    if (!nav.startsWith("Arrived")) {
+      console.log(`Could not reach ${target.id}: ${nav}`);
+      continue;
+    }
+
+    const pickupResult = await pickUp();
+    if (pickupResult.startsWith("Picked up")) {
+      pickedUp.push(target.id);
+    } else {
+      console.log(`Pickup failed for ${target.id}: ${pickupResult}`);
+    }
+  }
+
+  if (pickedUp.length === 0) return "No parcels were picked up.";
+
+  const dropNav = await navigateToClosestDropoff();
+  if (!dropNav.startsWith("Arrived")) {
+    return `Picked up ${pickedUp.length} parcel(s) but could not reach a dropoff: ${dropNav}`;
+  }
+  const del = await deliverParcel();
+  return `Picked up ${pickedUp.length} parcel(s): ${pickedUp.join(", ")}. Delivery: ${del}`;
+}
 
 const TOOLS = {
   calculate,
@@ -305,7 +344,8 @@ const TOOLS = {
   navigate_to_closest_dropoff: navigateToClosestDropoff,
   navigate_to_closest_spawn: navigateToClosestSpawn,
   get_visible_parcels: getVisibleParcels,
-  search_for_parcels: searchForParcels
+  search_for_parcels: searchForParcels,
+  collect_nearby_and_deliver: collectNearbyAndDeliver,
 };
 
 
@@ -315,10 +355,9 @@ const TOOLS = {
 function heuristic({x: x1, y: y1}, {x: x2, y: y2}) {
     return Math.abs(Math.round(x1) - Math.round(x2)) + Math.abs(Math.round(y1) - Math.round(y2));
 }
-function aStar(start, goal) {
+function aStar(start, goal, blocked = new Set()) {
     const open = [];
     const closed = new Set();
-    
     const cameFrom = new Map();
     const gScore = new Map();
     const fScore = new Map();
@@ -343,24 +382,21 @@ function aStar(start, goal) {
             {x: current.x, y: current.y + 1},
             {x: current.x, y: current.y - 1}
         ]) {
-            const tentativeG = gScore.get(currentKey) + 1;
             const neighborKey = key(neighbor.x, neighbor.y);
+            const tentativeG = gScore.get(currentKey) + 1;
 
-            if (closed.has(neighborKey)){
-                continue;
-            }
+            if (closed.has(neighborKey)) continue;
 
             const isGoal = (neighbor.x === goal.x && neighbor.y === goal.y);
-            if (!isWalkable(neighbor.x, neighbor.y) && !isGoal) {
-                continue;
-            }
+
+            // avoid tiles a blocker is occupying (don't enter even if it's the goal)
+            if (blocked.has(neighborKey)) continue;
+
+            if (!isWalkable(neighbor.x, neighbor.y) && !isGoal) continue;
 
             const currentTile = tileMap.get(currentKey);
             const neighborTile = tileMap.get(neighborKey) || { x: neighbor.x, y: neighbor.y, type: '3' };
-
-            if (!MoveIsAllowed(currentTile, neighborTile) && !isGoal) {
-                continue;
-            }
+            if (!MoveIsAllowed(currentTile, neighborTile) && !isGoal) continue;
 
             if (!gScore.has(neighborKey) || tentativeG < gScore.get(neighborKey)) {
                 cameFrom.set(neighborKey, current);
@@ -396,34 +432,64 @@ function MoveIsAllowed(fromTile, toTile) {
    return true;
 }
 
-async function followPath(start, goal, getPosition) {
-    let path = aStar(start, goal);
+async function followPath(start, goal, getPosition, maxRetries = 8) {
+  const blocked = new Set();
+  let path = aStar(start, goal, blocked);
+  let failures = 0;
 
-    while (path && path.length > 1) {
-      const from = path[0];
-      const to = path[1];
-        
-      const dx = to.x - from.x;
-      const dy = to.y - from.y;
+  while (path && path.length > 1) {
+    const from = path[0];
+    const to = path[1];
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const direction =
+      dx === 1 ? "right" : dx === -1 ? "left" : dy === 1 ? "up" : "down";
 
-      const direction = 
-      dx === 1 ? "right" :
-      dx === -1 ? "left" : 
-      dy === 1 ? "up" : "down";
+    const result = await move(direction);
 
-      const result = await move(direction);
+    if (result.startsWith("Error")) {
+      failures++;
+      if (failures >= maxRetries) {
+        return `Blocked: could not progress toward (${goal.x}, ${goal.y}) after ${maxRetries} attempts.`;
+      }
+      // mark the tile we tried to enter as blocked, then reroute around it
+      // in followPath, when a move fails:
+      const rawpos = await getPosition();
+      const pos = JSON.parse(rawpos);
 
-      if (result.startsWith("Error")) {
-        console.log(`Movement error: ${result}. Recalculating path...`);
-        const raw = await getPosition();
-        const current = JSON.parse(raw);
-        path = aStar(current, goal);
-      } else {
-        console.log(`Moved ${direction} to (${to.x}, ${to.y}).`);
-        path.shift();
+    if (to.x === goal.x && to.y === goal.y) {
+      // transient failure entering the destination — wait and retry, don't blacklist the goal
+      await new Promise(r => setTimeout(r, 300));
+      path = aStar(pos, goal, blocked);
+    } else {
+      blocked.add(key(to.x, to.y));
+      console.log(`Movement blocked toward (${to.x}, ${to.y}). Marking as blocked and recalculating path...`);
+      await new Promise(r => setTimeout(r, 300)); // brief pause before recalculating
+      path = aStar(pos, goal, blocked);
+
+      // ... existing reroute ...
+    }
+    if (!path) {
+      return `Blocked: no route to (${goal.x}, ${goal.y}) avoiding occupied tiles.`;
+    }
+    } else {
+      console.log(`Moved ${direction} to (${to.x}, ${to.y}).`);
+      path.shift();
+      // don't reset `blocked` — the agent may still be there;
+      // but do reset the failure counter since we made progress
+      failures = 0;
+
+      //Oppurtinistic pickup: if we see a parcel on the ground at our new position, pick it up before continuing to navigate to the goal
+      const here = [...parcels.values()].find(p => p.x === to.x && p.y === to.y && !p.carriedBy);
+      if (here) {
+        const r = await pickUp();
+        if (r.startsWith("Picked up")) {
+      console.log(`Opportunistic pickup of ${here.id} at (${to.x},${to.y}).`);
+    }
       }
     }
-    return path ? `Arrived at (${goal.x}, ${goal.y}).` : "No path found.";
+  }
+  return path ? `Arrived at (${goal.x}, ${goal.y}).` : "No path found.";
 }
 async function navigateTo(input) {
   const [x, y] = input.split(",").map(Number);
@@ -571,6 +637,8 @@ Available tools:
 - When the user asks to navigate to the "closest" dropoff or spawn, use these tools directly — no manual distance calculation needed.
 - get_visible_parcels(): returns a JSON array of all currently known or tracked parcels, including their IDs, coordinates, and rewards.
 - search_for_parcels(): automatically checks the map for unvisited or nearby spawn points and moves Alberto there to look for new parcels when none are currently visible.
+- When the user asks to pick up parcels and deliver them, prefer the collect_nearby_and_deliver() function which will automatically pick up nearby parcels and deliver them efficiently. 
+  Do not emit separate pick_up or deliver_parcel steps if collect_nearby_and_deliver() can be used.
 
 
 
@@ -600,7 +668,7 @@ Rules:
 - If the user asks where the agent is, include a step that uses get_my_position.
 - If the user asks to move the agent, include one move step for each single movement.
 - If the user asks for the final position after moving, include a final get_my_position step.
-- pickUp is also a valid action to include in the plan, it picks up a parcel if the agent is on a spawn point
+- pick_up is also a valid action to include in the plan, it picks up a parcel if the agent is on a spawn point
 - deliver_parcel is also a valid action to include in the plan, it delivers a parcel if the agent is on a dropoff point
 - When asked to search, pick up, and deliver, design plans that maximize efficiency.
 - If multiple parcels are likely to be found, instruct the agent to check for visible parcels, loop through picking up multiple high-reward parcels if they are nearby, and only then navigate to the closest dropoff to deliver them all.
@@ -616,7 +684,10 @@ Return exactly this JSON shape:
     "step 2"
   ]
 }
-
+- ANY request involving picking up and delivering parcels (e.g. "pick them up and deliver",
+  "collect and deliver", "search pick up deliver") MUST use exactly:
+  ["search_for_parcels()", "collect_nearby_and_deliver()"]
+  Never emit individual pick_up() or deliver_parcel() steps for multi-parcel collection.
 `.trim();
 
 const EXECUTOR_PROMPT = `
@@ -638,8 +709,10 @@ Available tools:
 - navigate_to_closest_dropoff(): navigates to the nearest known dropoff point automatically
 - navigate_to_closest_spawn(): navigates to the nearest known spawn point automatically
 - When the user asks to navigate to the "closest" dropoff or spawn, use these tools directly — no manual distance calculation needed.
--- get_visible_parcels(): returns a JSON array of all currently known or tracked parcels, including their IDs, coordinates, and rewards.
+- get_visible_parcels(): returns a JSON array of all currently known or tracked parcels, including their IDs, coordinates, and rewards.
 - search_for_parcels(): automatically checks the map for unvisited or nearby spawn points and moves Alberto there to look for new parcels when none are currently visible.
+- When the user asks to pick up parcels and deliver them, prefer the collect_nearby_and_deliver() function which will automatically pick up nearby parcels and deliver them efficiently. 
+  Do not emit separate pick_up or deliver_parcel steps if collect_nearby_and_deliver() can be used.
 
 Movement rules:
 - move(up) decreases y by 1
@@ -703,6 +776,7 @@ Rules:
 - If i ask you to deliver a parcel, you must make sure you stand on a dropoff point before calling deliver_parcel. If you are not on a dropoff point, you must navigate there first by calling navigate_to_closest_droppoff or navigate_to with the dropoff coordinates and then call deliver parcel
 - A step requiring 'pick_up()' or 'deliver_parcel()' is NOT complete until you have explicitly invoked that specific tool action and received its specific success observation. 
 - Do not assume that moving or arriving at a destination automatically executes a pickup or delivery.
+- If an Observation reports "unknown tool", you called a tool that does not exist. Re-read the available tools list, pick the correct exact name, and call it with a new Action. NEVER return a Step Result claiming success after an unknown-tool error.
 `.trim();
 
 const FINAL_ANSWER_PROMPT = ` 
