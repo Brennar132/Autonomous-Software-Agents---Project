@@ -118,25 +118,25 @@ socket.onSensing( async ( sensing ) => { // Update parcels information Delete/Ad
 
 // Make Alberto a bit more verbal
 const pickupCoordination = {};
-let teamAgentId = null; // set this to the ID of your teammate agent if you want to enable communication
 
 function isPickupMsg(msg) {
   return typeof msg === 'object' && msg !== null && msg.action === 'pickup' && 'parcelId' in msg;
 }
 
 socket.onMsg(async (id, name, msg, reply) => {  
-  if (isPickupMsg(msg)) {
-    await new Promise(r => setTimeout(r, 100)); // slight delay to ensure parcel state is updated
-    if (reply) {
-      if (pickupCoordination[msg.parcelId] === socket.id) {
-        reply(false);
-      } else {
-        pickupCoordination[msg.parcelId] = id;
-        reply(true);
-      }
-    }
+  if (isPickupMsg(msg)) {return;} // ignore pickup coordination messages in the logs to reduce noise
+
+  if (typeof msg === 'string' || msg?.type === 'mission') {
+
+    const instruction = typeof msg === 'string' ? msg : msg.instruction;
+    console.log(`\n[NEW INSTRUCTION] ${instruction}\n`);
+    await runAgentTurn(instruction)
+    if (reply) reply ('ack: ' + instruction);
     return;
   }
+
+
+
 });
 // ==========================================
 // 3. Standard Tools
