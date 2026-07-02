@@ -118,25 +118,36 @@ socket.onSensing( async ( sensing ) => { // Update parcels information Delete/Ad
 
 // Make Alberto a bit more verbal
 const pickupCoordination = {};
+const teamMessages = new Map(); 
+
 
 function isPickupMsg(msg) {
   return typeof msg === 'object' && msg !== null && msg.action === 'pickup' && 'parcelId' in msg;
 }
 
-socket.onMsg(async (id, name, msg, reply) => {  
-  if (isPickupMsg(msg)) {return;} // ignore pickup coordination messages in the logs to reduce noise
-
-  if (typeof msg === 'string' || msg?.type === 'mission') {
-
-    const instruction = typeof msg === 'string' ? msg : msg.instruction;
-    console.log(`\n[NEW INSTRUCTION] ${instruction}\n`);
-    await runAgentTurn(instruction)
-    if (reply) reply ('ack: ' + instruction);
+socket.onMsg(async (id, name, msg, reply) => {
+  // (a) pickup coordination handshake — existing
+  if (isPickupMsg(msg)) {
+    await new Promise(r => setTimeout(r, 100));
+    if (reply) {
+      if (pickupCoordination[msg.parcelId] === socket.id) {
+        reply(false);
+      } else {
+        pickupCoordination[msg.parcelId] = id;
+        reply(true);
+      }
+    }
     return;
   }
 
+  // (b) teammate position update — store it, no reply needed
+  if (msg?.type === 'position') {
+    teamMessages.set(id, { x: msg.x, y: msg.y, name });
+    console.log(`Teammate ${name} is at (${msg.x}, ${msg.y}).`);
+    return;
+  }
 
-
+  // (c) mission/command branch goes here next (see prior message)
 });
 // ==========================================
 // 3. Standard Tools

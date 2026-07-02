@@ -12,13 +12,16 @@
   "author": "Marco",
   "license": "ISC",
   "devDependencies": {
-    "dotenv": "^16.0.3"
+    "dotenv": "^16.6.1"
   },
   "dependencies": {
     "@unitn-asa/deliveroo-js-client": "^2.0.3",
-    "@unitn-asa/deliveroo-js-sdk": "^1.3.4",
+    "@unitn-asa/deliveroo-js-sdk": "^1.3.10",
     "@unitn-asa/pddl-client": "^0.0.37",
+    "argparse": "^2.0.1",
+    "duck-duck-scrape": "^2.2.7",
     "node-fetch": "^3.3.0",
+    "openai": "^6.41.0",
     "socket.io-client": "^4.6.0"
   },
   "repository": {
