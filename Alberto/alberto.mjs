@@ -119,6 +119,8 @@ socket.onSensing( async ( sensing ) => { // Update parcels information Delete/Ad
 // Make Alberto a bit more verbal
 const pickupCoordination = {};
 const teamMessages = new Map(); 
+let missionBusy = false; // Guard against concurrent missions aka having multiple runAgentTurn() calls at the same time
+
 
 
 function isPickupMsg(msg) {
@@ -147,8 +149,36 @@ socket.onMsg(async (id, name, msg, reply) => {
     return;
   }
 
-  // (c) mission/command branch goes here next (see prior message)
+  
+  // (c) mission/command branch
+  if (msg?.type === 'mission') {
+    const instruction = msg.text ?? msg.instruction ?? msg.content;
+    if (!instruction) {
+      if (reply) reply({ ok: false, error: 'No instruction provided.' });
+      return;
+    }
+
+    if (missionBusy) {
+      if (reply) reply({ ok: false, error: 'busy' });
+      return;
+    }
+
+    console.log(`Received mission from ${name} ${id}: ${instruction}`);
+    if (reply) reply({ ok: true, status: 'accepted' });
+
+    missionBusy = true;
+    try {
+      await runAgentTurn(instruction);
+    } catch (error) {
+      console.error(`Error executing mission from ${name} ${id}:`, error);
+    } finally {
+      missionBusy = false;
+    }
+    return;
+  }
 });
+
+
 // ==========================================
 // 3. Standard Tools
 // ==========================================
@@ -609,15 +639,19 @@ async function tellTeamMate(msg) {
 // ==========================================
 // 4. Reusable LLM call
 // ==========================================
-
-async function callModel(messages, { temperature = 0 } = {}) {
-  const response = await client.chat.completions.create({
-    model: MODEL,
-    messages,
-    temperature,
-  });
-
-  return response.choices?.[0]?.message?.content ?? "";
+//Protected against offline or unresponsive LLMs by retrying a few times before giving up and returning an empty string
+async function callModel(messages, { temperature = 0, retries = 2 } = {}) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await client.chat.completions.create({ model: MODEL, messages, temperature });
+      return response.choices?.[0]?.message?.content ?? "";
+    } catch (err) {
+      console.error(`callModel failed (attempt ${attempt + 1}, status ${err?.status ?? "?"}): ${err.message}`);
+      if (attempt === retries) return "";
+      await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+    }
+  }
+  return "";
 }
 
 // ==========================================
@@ -1144,7 +1178,11 @@ while (true) {
     continue;
   }
 
-  await runAgentTurn(userInput);
+  try {
+    await runAgentTurn(userInput);
+  } catch (err) {
+    console.error(`Agent turn failed: ${err.message}`);
+  }
 
   console.log(`Visible memory contains ${messages.length} messages.\n`);
 }
