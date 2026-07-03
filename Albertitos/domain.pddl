@@ -1,0 +1,26 @@
+(define (domain deliveroo)
+    (:requirements :strips :typing)
+    (:types tile parcel)
+    (:predicates
+        (at-me ?t - tile)
+        (at-parcel ?p - parcel ?t - tile)
+        (carrying ?p - parcel)
+        (is-dropoff ?t - tile)
+        (connected ?t1 - tile ?t2 - tile)
+    )
+    (:action move
+        :parameters (?from - tile ?to - tile)
+        :precondition (and (at-me ?from) (connected ?from ?to))
+        :effect (and (not (at-me ?from)) (at-me ?to))
+    )
+    (:action pickup
+        :parameters (?p - parcel ?t - tile)
+        :precondition (and (at-me ?t) (at-parcel ?p ?t))
+        :effect (and (not (at-parcel ?p ?t)) (carrying ?p))
+    )
+    (:action dropoff
+        :parameters (?p - parcel ?t - tile)
+        :precondition (and (at-me ?t) (is-dropoff ?t) (carrying ?p))
+        :effect (and (not (carrying ?p)) (at-parcel ?p ?t))
+    )
+)
