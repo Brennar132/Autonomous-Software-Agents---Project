@@ -191,6 +191,20 @@ setInterval(() => {
 }, 1000);
 
 // ==========================================
+// 2E. Dynamic game strategy from requests - Challenge 2 level 2
+// ==========================================
+
+const activeRules = {
+  requiredStackSize: null,
+  stackRewardMultiplier: 1,
+  tileRewardOverrides: new Map(),
+  maxParcelScore: Infinity,
+  forbiddenTiles: new Set()
+}
+
+
+
+// ==========================================
 // 3. Standard Tools
 // ==========================================
 
@@ -382,7 +396,9 @@ async function collectNearbyAndDeliver() {
 
   while (true) {
     const candidates = [...parcels.values()]
-      .filter(p => !p.carriedBy && p.reward > 0 && !processed.includes(p.id) && pickupCoordination[p.id] !== teamAgentId)
+      .filter(p => !p.carriedBy && p.reward > 0 
+        && p.reward <= activeRules.maxParcelScore
+        && !processed.includes(p.id) && pickupCoordination[p.id] !== teamAgentId)
       .sort((a, b) => b.reward - a.reward);
 
     if (candidates.length === 0) break;
@@ -424,24 +440,6 @@ async function collectNearbyAndDeliver() {
   return `Picked up ${pickedUp.length} parcel(s): ${pickedUp.join(", ")}. Delivery: ${del}`;
 }
 
-const TOOLS = {
-  calculate,
-  get_current_time: getCurrentTime,
-  get_my_position: getMyPosition,
-  move,
-  get_tile: getTile,
-  get_dropoffs: getDropoffs,
-  get_spawn_points: getSpawnPoints,
-  pick_up: pickUp,
-  deliver_parcel: deliverParcel,
-  navigate_to: navigateTo,
-  navigate_to_closest_dropoff: navigateToClosestDropoff,
-  navigate_to_closest_spawn: navigateToClosestSpawn,
-  get_visible_parcels: getVisibleParcels,
-  search_for_parcels: searchForParcels,
-  collect_nearby_and_deliver: collectNearbyAndDeliver,
-  tell_team_mate: tellTeamMate,
-};
 
 
 // ==========================================
@@ -528,7 +526,7 @@ function MoveIsAllowed(fromTile, toTile) {
 }
 
 async function followPath(start, goal, getPosition, maxRetries = 8) {
-  const blocked = new Set();
+  const blocked = new Set(activeRules.forbiddenTiles);
   let path = aStar(start, goal, blocked);
   let failures = 0;
 
@@ -646,7 +644,58 @@ async function tellTeamMate(msg) {
   return "Message sent to team mate.";
 }
 
+// ==========================================
+// 3.4 Game Strategy Adaption
+// ==========================================
 
+async function addForbiddenTile(input) {
+  const [x, y] = input.split(",").map(Number);
+  activeRules.forbiddenTiles.add(key(x, y));
+  return `Added forbidden tile at (${x}, ${y}).`;
+}
+
+async function setTileReward(input) {
+  const [x, y, reward] = input.split(",").map(Number);
+  activeRules.tileRewardOverrides.set(key(x, y), reward);
+  return `Set reward for tile (${x}, ${y}) to ${reward}x.`;
+}
+
+async function setDeliveryStackSize(input) {
+  activeRules.requiredStackSize = Number(input);
+  return `Set required delivery stack size to ${Number(input)}.`;
+}
+
+async function setMaxParcelScore(input) {
+  activeRules.maxParcelScore = Number(input);
+  return `Ignoring parcels with higher score than ${Number(input)}.`;
+}
+
+// ==========================================
+// 3.5 Tool Registry
+// ==========================================
+
+const TOOLS = {
+  calculate,
+  get_current_time: getCurrentTime,
+  get_my_position: getMyPosition,
+  move,
+  get_tile: getTile,
+  get_dropoffs: getDropoffs,
+  get_spawn_points: getSpawnPoints,
+  pick_up: pickUp,
+  deliver_parcel: deliverParcel,
+  navigate_to: navigateTo,
+  navigate_to_closest_dropoff: navigateToClosestDropoff,
+  navigate_to_closest_spawn: navigateToClosestSpawn,
+  get_visible_parcels: getVisibleParcels,
+  search_for_parcels: searchForParcels,
+  collect_nearby_and_deliver: collectNearbyAndDeliver,
+  tell_team_mate: tellTeamMate,
+  add_forbidden_tile: addForbiddenTile,
+  set_delivery_stack_size: setDeliveryStackSize,
+  set_tile_reward: setTileReward,
+  set_max_parcel_score: setMaxParcelScore
+};
 // ==========================================
 // 4. Reusable LLM call
 // ==========================================
@@ -751,7 +800,10 @@ Available tools:
 - search_for_parcels(): automatically checks the map for unvisited or nearby spawn points and moves Alberto there to look for new parcels when none are currently visible.
 - When the user asks to pick up parcels and deliver them, prefer the collect_nearby_and_deliver() function which will automatically pick up nearby parcels and deliver them efficiently. 
   Do not emit separate pick_up or deliver_parcel steps if collect_nearby_and_deliver() can be used.
-
+- add_forbidden_tile(x,y): registers a tile the agent must never path through. Input format: "x,y"
+- set_delivery_stack_size(n): require delivering exactly n parcels at once
+- set_tile_reward(x,y,mult): delivering on tile (x,y) pays mult times normal. Input format: "x,y,mult"
+- set_max_parcel_score(n): ignore parcels with reward above n
 
 
 Movement rules:
@@ -827,6 +879,10 @@ Available tools:
 - When the user asks to pick up parcels and deliver them, prefer the collect_nearby_and_deliver() function which will automatically pick up nearby parcels and deliver them efficiently. 
   Do not emit separate pick_up or deliver_parcel steps if collect_nearby_and_deliver() can be used.
 - tell_team_mate(message): sends a message to the teammate agent (use for sharing position or coordinating)
+- add_forbidden_tile(x,y): registers a tile the agent must never path through. Input format: "x,y"
+- set_delivery_stack_size(n): require delivering exactly n parcels at once
+- set_tile_reward(x,y,mult): delivering on tile (x,y) pays mult times normal. Input format: "x,y,mult"
+- set_max_parcel_score(n): ignore parcels with reward above n
 
 Movement rules:
 - move(up) decreases y by 1
