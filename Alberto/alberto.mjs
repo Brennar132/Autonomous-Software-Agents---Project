@@ -178,6 +178,17 @@ socket.onMsg(async (id, name, msg, reply) => {
   }
 });
 
+// ==========================================
+// 2D. Position broadcast — make Alberto verbal
+// ==========================================
+setInterval(() => {
+  if (me.id && teamAgentId) {
+    socket.emitSay(teamAgentId, { type: 'position', x: me.x, y: me.y });
+    //console.log(`[COMMS] Sent position to teammate: (${me.x}, ${me.y}) to ${teamAgentId}`);
+  } else {
+    //console.log(`[COMMS] silent — me.id=${me.id}, teamAgentId=${teamAgentId}`);
+  }
+}, 1000);
 
 // ==========================================
 // 3. Standard Tools
