@@ -16,6 +16,7 @@ const CONFIG = {
         PLANNING_HEARTBEAT: 1000,
         EXECUTION_TICK:     100,
         TILE_EXPIRATION:    30000,
+        DYNAMIC_OBSTACLE:   2000,   // How long a tile blocked by another agent is excluded from planning
     },
     LIMITS: {
         MAX_CARRIED_PARCELS: 6,
@@ -28,7 +29,11 @@ const CONFIG = {
         DROPOFF:     "2",
         PATH:        "3",
         GATE_OPEN:   "5",
-        GATE_BLOCKED:"5!"
+        GATE_BLOCKED:"5!",
+        UP:          "↑",
+        DOWN:        "↓",
+        LEFT:        "←",
+        RIGHT:       "→"
     },
     PLANNER: {
         PROBLEM_FILE: 'problem.pddl',
@@ -46,6 +51,7 @@ const tileMap    = new Map();
 const dropoffs   = new Map();
 const spawnPoints = new Map();
 const recentlyVisited = new Map();
+const dynamicObstacles = new Map();
 
 let currentPlanActions     = [];
 let isPlanning             = false;
@@ -194,26 +200,80 @@ function selectParcelsAndDropoff() {
 }
 
 // ==========================================
+// NAVIGATION AND TILE RULES
+// ==========================================
+const DIRECTIONS = [[1,0],[-1,0],[0,1],[0,-1]];
+
+function setDynamicObstacle(x, y, duration = CONFIG.TIMEOUTS.DYNAMIC_OBSTACLE) {
+    const k = tileKey(x, y);
+    dynamicObstacles.set(k, true);
+    setTimeout(() => dynamicObstacles.delete(k), duration);
+}
+
+// A gate can be pushed open if the tile it would be pushed into (one step
+// further along the travel direction) is currently the open half of the gate
+function isBoxPushable(bx, by, dx, dy) {
+    const behindTile = tileMap.get(tileKey(bx + dx, by + dy));
+    return behindTile && behindTile.type === CONFIG.TILE_TYPES.GATE_OPEN;
+}
+
+function applyBoxPush(bx, by, dx, dy) {
+    const boxKey    = tileKey(bx, by);
+    const behindKey = tileKey(bx + dx, by + dy);
+    tileMap.set(boxKey,    { x: bx,      y: by,      type: CONFIG.TILE_TYPES.GATE_OPEN    });
+    tileMap.set(behindKey, { x: bx + dx, y: by + dy, type: CONFIG.TILE_TYPES.GATE_BLOCKED });
+    worldChangedSinceLastPlan = true;
+}
+
+// Directional tiles (arrows) only allow entry from one specific side
+function isDirectionalMoveAllowed(fromTile, toTile) {
+    if (!fromTile || !toTile) return true;
+
+    const dx = toTile.x - fromTile.x;
+    const dy = toTile.y - fromTile.y;
+
+    if (toTile.type === CONFIG.TILE_TYPES.UP    && dy !== 1)  return false;
+    if (toTile.type === CONFIG.TILE_TYPES.DOWN  && dy !== -1) return false;
+    if (toTile.type === CONFIG.TILE_TYPES.LEFT  && dx !== 1)  return false;
+    if (toTile.type === CONFIG.TILE_TYPES.RIGHT && dx !== -1) return false;
+
+    return true;
+}
+
+// ==========================================
 // PDDL GENERATION
 // ==========================================
 function buildWalkableTiles() {
-    return Array.from(tileMap.values()).filter(
-        t => t.type !== CONFIG.TILE_TYPES.WALL &&
-             t.type !== CONFIG.TILE_TYPES.GATE_BLOCKED
-    );
+    return Array.from(tileMap.values()).filter(t => {
+        if (t.type === CONFIG.TILE_TYPES.WALL) return false;
+        if (dynamicObstacles.has(tileKey(t.x, t.y))) return false;
+
+        // A blocked gate is only a valid planning target if it is pushable
+        // from at least one side; buildConnectivity resolves which side
+        if (t.type === CONFIG.TILE_TYPES.GATE_BLOCKED)
+            return DIRECTIONS.some(([dx, dy]) => isBoxPushable(t.x, t.y, dx, dy));
+
+        return true;
+    });
 }
 
 function buildConnectivity(tiles) {
     let s = '';
     for (const tile of tiles) {
         const tk = tileKey(tile.x, tile.y);
-        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        for (const [dx, dy] of DIRECTIONS) {
             const nk    = tileKey(tile.x + dx, tile.y + dy);
             const nTile = tileMap.get(nk);
-            if (nTile &&
-                nTile.type !== CONFIG.TILE_TYPES.WALL &&
-                nTile.type !== CONFIG.TILE_TYPES.GATE_BLOCKED)
-                s += `    (connected ${tk} ${nk})\n`;
+            if (!nTile || nTile.type === CONFIG.TILE_TYPES.WALL) continue;
+            if (dynamicObstacles.has(nk)) continue;
+
+            if (nTile.type === CONFIG.TILE_TYPES.GATE_BLOCKED) {
+                if (!isBoxPushable(nTile.x, nTile.y, dx, dy)) continue;
+            } else if (!isDirectionalMoveAllowed(tile, nTile)) {
+                continue;
+            }
+
+            s += `    (connected ${tk} ${nk})\n`;
         }
     }
     return s;
@@ -293,6 +353,7 @@ function getExploreTarget() {
 
     const fresh = Array.from(tileMap.values()).filter(t =>
         t.type !== CONFIG.TILE_TYPES.WALL &&
+        !dynamicObstacles.has(tileKey(t.x, t.y)) &&
         (!recentlyVisited.has(tileKey(t.x, t.y)) ||
          now - recentlyVisited.get(tileKey(t.x, t.y)) > STALE)
     );
@@ -391,6 +452,8 @@ async function executeNextAction() {
             const parts   = step.args[1].split('_');
             const targetX = parseInt(parts[1]);
             const targetY = parseInt(parts[2]);
+            const fromX   = me.x;
+            const fromY   = me.y;
 
             let dir = null;
             if      (targetX > me.x) dir = 'right';
@@ -405,6 +468,13 @@ async function executeNextAction() {
                 ]);
 
                 if (success) {
+                    // Stepping onto a blocked gate pushes the box one tile further
+                    // along the travel direction, opening this tile up
+                    const enteredTile = tileMap.get(tileKey(targetX, targetY));
+                    if (enteredTile && enteredTile.type === CONFIG.TILE_TYPES.GATE_BLOCKED) {
+                        applyBoxPush(targetX, targetY, targetX - fromX, targetY - fromY);
+                    }
+
                     // Opportunistic pickup: grab any free parcel we just stepped on
                     const nowCarrying = Array.from(parcels.values()).filter(p => p.carriedBy === me.id);
                     if (nowCarrying.length < CONFIG.LIMITS.MAX_CARRIED_PARCELS) {
@@ -419,6 +489,10 @@ async function executeNextAction() {
                             console.log(`[PICKUP+] ${here.id} at (${targetX},${targetY})`);
                         }
                     }
+                } else {
+                    // Movement blocked unexpectedly (most likely another agent) —
+                    // exclude the tile from planning instead of retrying the same plan
+                    setDynamicObstacle(targetX, targetY);
                 }
             }
         }
