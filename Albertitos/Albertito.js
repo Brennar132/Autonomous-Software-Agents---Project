@@ -1,7 +1,11 @@
 import 'dotenv/config';
 import { DjsConnect } from "@unitn-asa/deliveroo-js-sdk/client";
 
-const socket = DjsConnect();
+const socket = DjsConnect(
+  process.env.DELIVEROOJS_URL,
+  process.env.DELIVEROOJS_TOKEN
+);
+
 
 // ==========================================
 // CONFIGURATION AND SYSTEM PARAMETERS
