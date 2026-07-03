@@ -1,6 +1,6 @@
-# AlbertitoV2 — Implementation Notes (vs. `intention_revision.js`)
+# Albertito — Implementation Notes (vs. `intention_revision.js`)
 
-This README focuses on what **AlbertitoV2** implements/improves compared to the baseline agent in `intention_revision.js`, and how those changes are reflected in the code.
+This README focuses on what **Albertito** implements/improves compared to the baseline agent in `intention_revision.js`, and how those changes are reflected in the code.
 
 ---
 
@@ -12,7 +12,7 @@ This README focuses on what **AlbertitoV2** implements/improves compared to the 
   - No pathfinding: it fails when a wall / one-way tile / blocked tile prevents direct movement.
   - “Stuck” detection is minimal (`throw 'stucked'`).
 
-### AlbertitoV2 (`albertitoV2.js`)
+### Albertito (`Albertito.js`)
 - Replaces `BlindMove` with `AStarMove` + full A* implementation:
   - `aStar(start, goal)` computes a shortest path with Manhattan heuristic (`distance`).
   - `reconstructPath(...)` rebuilds the chosen path.
@@ -35,7 +35,7 @@ This README focuses on what **AlbertitoV2** implements/improves compared to the 
 - No notion of other agents blocking tiles.
 - No special handling for blocked objects; “stuck” is final.
 
-### AlbertitoV2
+### Albertito
 Adds two mechanisms:
 
 #### 2.1 Dynamic obstacles (temporary)
@@ -44,7 +44,7 @@ When a move fails, the agent assumes something dynamic (e.g., another bot) is in
 - `dynamicObstacles` map is used by `isWalkable(...)` to avoid re-trying the same failing step for a while.
 
 #### 2.2 Pushable blocked tiles (gate/box model)
-AlbertitoV2 models a “blocked gate” tile and tries to reason about pushing:
+Albertito models a “blocked gate” tile and tries to reason about pushing:
 - Tile types:
   - `GATE_OPEN: "5"`
   - `GATE_BLOCKED: "5!"`
@@ -66,7 +66,7 @@ This is a major improvement over the baseline where the map is effectively stati
   - `tileMap`, `dropoffs`, `spawnPoints`
 - Tiles are stored, but there is no “forgetting” nor visit tracking.
 
-### AlbertitoV2
+### Albertito
 Adds additional belief structures:
 - `dynamicObstacles`: temporary non-walkable tiles caused by movement failures.
 - `blacklistedParcels`: parcels temporarily ignored after failed pickup attempts.
@@ -85,7 +85,7 @@ Also adds a tile-change aware handler:
 - Always adds a pickup option for every free parcel.
 - If no parcels: random explore target (`getExploreTarget`), mostly random.
 
-### AlbertitoV2 (`optionsGeneration()` in `albertitoV2.js`)
+### Albertito (`optionsGeneration()` in `Albertitojs`)
 The behavior is split into explicit cases and uses heuristics:
 
 #### Case 1 — Carrying parcels → deliver, but allow “marginal” pickup
@@ -127,7 +127,7 @@ Baseline explores mostly at random.
 - If a new intention arrives, append it and stop the last one.
 - Validity check is hardcoded and incomplete (skips if parcel is carried, but does not shift/continue cleanly).
 
-### AlbertitoV2
+### Albertito
 Keeps the “Replace” style but adds **preemption rules** and better duplication checks:
 - Does not enqueue duplicates (compares predicate prefix).
 - If currently delivering (`go_to_dropoff`) and a strong pickup is generated (`go_pick_up`):
@@ -144,7 +144,7 @@ This reduces wasted time when the world state changes.
 
 ## 6) Plan library changes (mapping baseline → V2)
 
-| Goal predicate | Baseline plan | AlbertitoV2 plan | Main difference |
+| Goal predicate | Baseline plan | Albertito plan | Main difference |
 |---|---|---|---|
 | `go_pick_up` | `GoPickUp` | `GoPickUp` (enhanced) | Validity checks + blacklisting on failure |
 | `go_to` | `BlindMove` | `AStarMove` | Proper pathfinding + replanning + obstacle logic |
@@ -164,7 +164,7 @@ This reduces wasted time when the world state changes.
 - `socket.onYou(optionsGeneration)`
 So decisions are event-driven and may be too frequent / jittery.
 
-### AlbertitoV2
+### Albertito
 - Uses a fixed heartbeat:
   - `setInterval(() => { if (me.id) optionsGeneration(); }, AGENT_HEARTBEAT)`
 - Exploration is throttled with `EXPLORATION_MS`.
@@ -175,7 +175,7 @@ This makes deliberation steadier and easier to tune.
 
 ## 8) Configuration-driven behavior (tuning knobs)
 
-AlbertitoV2 centralizes parameters inside `CONFIG`, e.g.:
+Albertito centralizes parameters inside `CONFIG`, e.g.:
 - Pathing robustness: `MOVE_RACE`, `ASTAR_STUCK`, `MAX_RETRIES`
 - Tactics: `MAX_CARRIED_PARCELS`, `MARGINAL_DIST_THRESHOLD`
 - Utility weights: `PICKUP_ALPHA`, `PICKUP_BETA`
@@ -184,7 +184,16 @@ AlbertitoV2 centralizes parameters inside `CONFIG`, e.g.:
 
 The baseline has these values spread across code (or missing).
 
----
+## 9) Team coordination with "Alberto" (not present in baseline)
+
+Albertito can optionally run paired with a second agent ("Alberto") and exchange messages over `socket.onMsg` / `socket.emitSay`. None of this exists in the baseline, which is single-agent only.
+
+- **Identification**: `--teammate-id` CLI arg (parsed with `argparse`) sets `albertoId`. If absent, Albertito runs solo and comms are skipped.
+- **Position sharing**: every 1s (`setInterval`), Albertito broadcasts its own position to `albertoId` via `socket.emitSay(albertoId, {type: 'position', x, y})`.
+- **Reacting to the teammate's position**: on receiving a `{type: 'position'}` message, Albertito stores it in the local `teammate` belief and marks that tile as a short-lived `dynamicObstacle` (800ms) so its own A* avoids stepping onto the teammate.
+- **Pickup contention**: on receiving a `{action: 'pickup', parcelId}` message with a `reply` callback, Albertito replies `true`/`false` depending on whether it is *currently* chasing that same parcel (`go_pick_up` intention with matching id) — a simple mutual-exclusion handshake to avoid both agents converging on the same parcel.
+
+**Key implementation pieces**: `commsParser`/`albertoId`, `teammate` belief, `socket.onMsg(...)`, the position-broadcast `setInterval`.
 
 ## Quick “what to read in the code”
 1. **Navigation**: `aStar`, `isWalkable`, `MoveIsAllowed`, `AStarMove.execute`

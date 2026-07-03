@@ -1,9 +1,10 @@
 import 'dotenv/config';
 import { DjsConnect } from "@unitn-asa/deliveroo-js-sdk/client";
+import {ArgumentParser} from "argparse";
 
 const socket = DjsConnect(
-  process.env.DELIVEROOJS_URL,
-  process.env.DELIVEROOJS_TOKEN
+  process.env.DELIVEROO_API_URL,
+  process.env.DELIVEROO_API_TOKEN
 );
 
 
@@ -35,11 +36,8 @@ const CONFIG = {
         GATE_BLOCKED: "5!"
     },
     UTILITY: {
-        DROPOFF_MULT: 8,
         PICKUP_ALPHA: 20,
-        PICKUP_BETA: 15,
-        PICKUP_EMPTY_MULT: 25,
-        EXPLORATION_BASE: 100
+        PICKUP_BETA: 15
     }
 };
 
@@ -128,6 +126,49 @@ function blacklistParcel(id, duration = 5000) {
     blacklistedParcels.set(id, true);
     setTimeout(() => blacklistedParcels.delete(id), duration);
 }
+
+// =========================================
+// COMMUNICATION MODULE
+// =========================================
+
+const commsParser = new ArgumentParser({description: 'Albertito BDI comms'});
+commsParser.add_argument("--teammate-id", {help: "Alberto's agent id", required: false});
+const albertoId = commsParser.parse_args().teammate_id ?? null;
+console.log("Teammate (Alberto) ID: ", albertoId ?? "None - going solo");
+
+const teammate = {id: albertoId, x: -1, y: -1, lastSeen: 0};
+
+socket.onMsg(async (id, name, msg, reply) => {
+    if (msg?.action === 'pickup' && 'parcelId' in msg){
+        if(reply){
+            const current = myAgent.intention_queue[0];
+            const iAmChasing = 
+                current?.predicate?.[0] === 'go_pick_up' && 
+                current?.predicate?.[3] === msg.parcelId;
+
+            reply(!iAmChasing);
+        }
+        return;
+    }
+
+    //Position update from Alberto
+    if(msg?.type === 'position'){
+        teammate.x = msg.x;
+        teammate.y = msg.y;
+        teammate.lastSeen = Date.now();
+        if(msg.x >= 0 && msg.y >= 0) setDynamicObstacle(msg.x, msg.y, 800);
+        console.log(`[COMMS] Received position update from Alberto: (${msg.x}, ${msg.y})`);
+    }
+});
+
+setInterval(() => {
+    if (me.id && albertoId){
+        socket.emitSay(albertoId, {type: 'position', x: me.x, y: me.y});
+        console.log(`[COMMS] Sent position update to Alberto: (${me.x}, ${me.y}) to ${albertoId}`);
+    }else {
+    console.log(`[COMMS] silent — me.id=${me.id}, teamAgentId=${albertoId}`);
+  }
+}, 1000); 
 
 // ==========================================
 // NAVIGATION AND GEOMETRY RULES
@@ -276,117 +317,172 @@ function nearestDropoff() {
     return best;
 }
 
+function getSpawnZoneDensity(cx, cy, radius = 4) {
+    let count = 0;
+    for (const p of parcels.values()) {
+        if (!p.carriedBy && distance({ x: cx, y: cy }, p) <= radius) count++;
+    }
+    return count;
+}
+
+function getBestPickupChain() {
+    const freeParcels = Array.from(parcels.values())
+        .filter(p => !p.carriedBy && !blacklistedParcels.has(p.id));
+
+    if (freeParcels.length === 0) return null;
+
+    const nearest = nearestDropoff();
+    if (!nearest) return null;
+
+    // Greedy TSP: start from me, always pick nearest parcel that improves total score
+    let current = { x: me.x, y: me.y };
+    const chain = [];
+    const remaining = [...freeParcels];
+    let totalDetour = 0;
+
+    while (chain.length < CONFIG.LIMITS.MAX_CARRIED_PARCELS && remaining.length > 0) {
+        // Score each remaining parcel: reward minus detour cost
+        let bestScore = -Infinity;
+        let bestIdx = -1;
+
+        for (let i = 0; i < remaining.length; i++) {
+            const p = remaining[i];
+            const detour = distance(current, p);
+            // Only consider parcels that don't add too much total detour
+            if (totalDetour + detour > 12) continue;
+            const score = p.reward - detour * 2;
+            if (score > bestScore) {
+                bestScore = score;
+                bestIdx = i;
+            }
+        }
+
+        if (bestIdx === -1) break;
+
+        const chosen = remaining.splice(bestIdx, 1)[0];
+        chain.push(chosen);
+        totalDetour += distance(current, chosen);
+        current = chosen;
+    }
+
+    return chain.length > 0 ? chain : null;
+}
+
 // ==========================================
 // BDI ARCHITECTURE AND DELIBERATION LOOP
 // ==========================================
 
 function optionsGeneration() {
-    const options = [];
     const carrying = Array.from(parcels.values()).filter(p => p.carriedBy === me.id);
     const totalCarryingReward = carrying.reduce((sum, p) => sum + p.reward, 0);
     const nearest = nearestDropoff();
-    
+
     const currentIntention = myAgent.intention_queue[0];
     let currentTarget = null;
     if (currentIntention) {
         const [, currX, currY] = currentIntention.predicate;
         currentTarget = { x: currX, y: currY };
     }
-    
-    if (carrying.length > 0) {
-        for (const dropoff of dropoffs.values()) {
-            options.push(['go_to_dropoff', dropoff.x, dropoff.y]);
-        }
-    }
 
-    if (carrying.length < CONFIG.LIMITS.MAX_CARRIED_PARCELS) {
-        for (const parcel of parcels.values()) {
-            if (!parcel.carriedBy && !blacklistedParcels.has(parcel.id)) {
-                options.push(['go_pick_up', parcel.x, parcel.y, parcel.id, parcel.reward]);
-            }
-        }
-    }
+    // ── CASE 1: carrying parcels → go deliver, but grab nearby ones on the way ──
+    if (carrying.length > 0 && nearest) {
+        // Check if there's a parcel very close that's worth picking up before delivery
+        if (carrying.length < CONFIG.LIMITS.MAX_CARRIED_PARCELS) {
+            const freeParcels = Array.from(parcels.values())
+                .filter(p => !p.carriedBy && !blacklistedParcels.has(p.id));
 
-    if (carrying.length === 0) {
-        const hasFreeParcels = Array.from(parcels.values()).some(p => !p.carriedBy);
-        if (!hasFreeParcels && (Date.now() - lastExplorationUpdate > CONFIG.TIMEOUTS.EXPLORATION_MS)) {
-            const exploreTarget = getExploreTarget();
-            if (exploreTarget) {
-                options.push(['go_to_discover', exploreTarget.x, exploreTarget.y]);
-                lastExplorationUpdate = Date.now();
-            }
-        }
-    }
+            let bestPickup = null;
+            let bestUtility = -Infinity;
 
-    let best_option = null;
-    let maxUtility = -Number.MAX_VALUE;
-
-    for (const option of options) {
-        const [type, x, y, , reward] = option;
-        let utility = 0;
-
-        if (carrying.length > 0) {
-            if (type === 'go_to_dropoff') {
-                utility = (totalCarryingReward * CONFIG.UTILITY.DROPOFF_MULT) - distance(me, { x, y });
-            } else if (type === 'go_pick_up' && nearest) {
-                const dMeToParcel = distance(me, { x, y });
-                const dParcelToDrop = distance({ x, y }, nearest);
+            for (const p of freeParcels) {
+                const dMeToParcel = distance(me, p);
+                const dParcelToDrop = distance(p, nearest);
                 const dMeToDrop = distance(me, nearest);
                 const marginalDistance = dMeToParcel + dParcelToDrop - dMeToDrop;
 
                 if (marginalDistance > CONFIG.LIMITS.MARGINAL_DIST_THRESHOLD) continue;
-                
-                utility = (reward * CONFIG.UTILITY.PICKUP_ALPHA) - (marginalDistance * CONFIG.UTILITY.PICKUP_BETA);
-            } else {
-                continue;
+
+                const utility = (p.reward * CONFIG.UTILITY.PICKUP_ALPHA) - (marginalDistance * CONFIG.UTILITY.PICKUP_BETA);
+                if (utility > bestUtility) {
+                    bestUtility = utility;
+                    bestPickup = p;
+                }
             }
-        } else {
-            if (type !== 'go_pick_up' && type !== 'go_to_discover') continue;
-            
-            if (type === 'go_pick_up') {
-                utility = (reward * CONFIG.UTILITY.PICKUP_EMPTY_MULT) - distance(me, { x, y });
-            } else {
-                utility = CONFIG.UTILITY.EXPLORATION_BASE - distance(me, { x, y });
+
+            if (bestPickup) {
+                const option = ['go_pick_up', bestPickup.x, bestPickup.y, bestPickup.id, bestPickup.reward];
+                if (!currentTarget || option[1] !== currentTarget.x || option[2] !== currentTarget.y) {
+                    myAgent.push(option);
+                    return;
+                }
             }
         }
 
-        if (utility > maxUtility) {
-            maxUtility = utility;
-            best_option = option;
+        // No good pickup on the way → deliver
+        let bestDropoff = null;
+        let bestDist = Infinity;
+        for (const d of dropoffs.values()) {
+            const dd = distance(me, d);
+            if (dd < bestDist) { bestDist = dd; bestDropoff = d; }
         }
+        if (bestDropoff) {
+            const option = ['go_to_dropoff', bestDropoff.x, bestDropoff.y];
+            if (!currentTarget || option[1] !== currentTarget.x || option[2] !== currentTarget.y) {
+                myAgent.push(option);
+            }
+        }
+        return;
     }
 
-    if (best_option) {
-        if (currentTarget && best_option[1] === currentTarget.x && best_option[2] === currentTarget.y) {
-            return; 
+    // ── CASE 2: not carrying → use pickup chain ──
+    const chain = getBestPickupChain();
+
+    if (chain && chain.length > 0) {
+        const next = chain[0];
+        const option = ['go_pick_up', next.x, next.y, next.id, next.reward];
+        if (!currentTarget || option[1] !== currentTarget.x || option[2] !== currentTarget.y) {
+            myAgent.push(option);
         }
-        myAgent.push(best_option);
+        return;
+    }
+
+    // ── CASE 3: no parcels visible → explore densest spawn zone ──
+    if (Date.now() - lastExplorationUpdate > CONFIG.TIMEOUTS.EXPLORATION_MS) {
+        const exploreTarget = getBestExploreTarget();
+        if (exploreTarget) {
+            const option = ['go_to_discover', exploreTarget.x, exploreTarget.y];
+            if (!currentTarget || option[1] !== currentTarget.x || option[2] !== currentTarget.y) {
+                myAgent.push(option);
+            }
+            lastExplorationUpdate = Date.now();
+        }
     }
 }
 
-function getExploreTarget() {
+function getBestExploreTarget() {
     const now = Date.now();
     const STALE_THRESHOLD = 15000;
 
-    const freshSpawns = Array.from(spawnPoints.values()).filter(t => {
-        const t_visited = recentlyVisited.get(key(t.x, t.y));
-        return !t_visited || (now - t_visited > STALE_THRESHOLD);
+    // Score each spawn point: prefer ones not recently visited AND with high density history
+    const scoredSpawns = Array.from(spawnPoints.values()).map(t => {
+        const lastVisit = recentlyVisited.get(key(t.x, t.y)) || 0;
+        const staleness = Math.min(now - lastVisit, STALE_THRESHOLD) / STALE_THRESHOLD; // 0-1
+        const density = getSpawnZoneDensity(t.x, t.y, 3);
+        const distPenalty = distance(me, t) * 0.5;
+        return { t, score: staleness * 100 + density * 20 - distPenalty };
     });
 
-    if (freshSpawns.length > 0) {
-        return freshSpawns[Math.floor(Math.random() * freshSpawns.length)];
-    }
+    scoredSpawns.sort((a, b) => b.score - a.score);
 
+    if (scoredSpawns.length > 0) return scoredSpawns[0].t;
+
+    // Fallback: any stale walkable tile
     const fresh = Array.from(tileMap.values()).filter(t =>
-        t.type !== CONFIG.TILE_TYPES.WALL && 
+        t.type !== CONFIG.TILE_TYPES.WALL &&
         (!recentlyVisited.has(key(t.x, t.y)) || now - recentlyVisited.get(key(t.x, t.y)) > STALE_THRESHOLD)
     );
 
-    if (fresh.length > 0) {
-        return fresh[Math.floor(Math.random() * fresh.length)];
-    }
-
-    return null;
+    return fresh.length > 0 ? fresh[Math.floor(Math.random() * fresh.length)] : null;
 }
 
 // Interuption of intentions if the target parcel is no longer available
@@ -558,6 +654,12 @@ class GoPickUp extends PlanBase {
         }
 
         if (this.stopped) throw ['stopped'];
+
+        const parcelNow = parcels.get(id);
+        if (!parcelNow || parcelNow.carriedBy) {
+            throw ['parcel taken during navigation', id];
+        }
+
         await socket.emitPickup();
         return true;
     }
@@ -609,14 +711,16 @@ class AStarMove extends PlanBase {
 
              if (moved) {
                 retries = 0;
-                
+
                 const carrying = Array.from(parcels.values()).filter(p => p.carriedBy === me.id);
                 if (carrying.length < CONFIG.LIMITS.MAX_CARRIED_PARCELS) {
                     const parcelHere = Array.from(parcels.values()).find(
                         p => Math.round(p.x) === next.x && Math.round(p.y) === next.y && !p.carriedBy
                     );
                     if (parcelHere) {
-                        await socket.emitPickup();
+                        const result = await socket.emitPickup();
+                        // Small pause to let the server confirm state before continuing
+                        await new Promise(res => setTimeout(res, 50))
                     }
                 }
 

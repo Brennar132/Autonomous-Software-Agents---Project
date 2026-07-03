@@ -89,6 +89,7 @@ CONFIG = {
         PLANNING_HEARTBEAT: 1000,  // ms between deliberation checks
         EXECUTION_TICK:     100,   // ms between action execution attempts
         TILE_EXPIRATION:    30000, // ms before a visited tile is considered stale
+        DYNAMIC_OBSTACLE:   2000,  // ms a tile blocked by another agent is excluded from planning
     },
     LIMITS: {
         MAX_CARRIED_PARCELS: 6,  // max parcels the agent can hold
@@ -109,6 +110,8 @@ CONFIG = {
 **`MAX_DETOUR_CARRYING`** controls how far off-route the agent will go to grab an extra parcel when already committed to a dropoff. Set to 0 to disable on-the-way pickups entirely.
 
 **`PLANNING_HEARTBEAT`** controls how often the agent reconsiders its plan. Lower = more reactive but more planner calls.
+
+**`DYNAMIC_OBSTACLE`** controls how long a tile is excluded from planning after a move onto it unexpectedly fails (see [Dynamic Obstacles](#dynamic-obstacles-not-modeled-by-the-planner) below).
 
 ---
 
@@ -194,3 +197,16 @@ Plan is still valid if:
 ```
 
 If the plan is valid, the loop suppresses `worldChangedSinceLastPlan` to avoid unnecessary replanning while moving toward the dropoff. If the plan is invalid or exhausted, a new planning cycle is triggered.
+
+### 7. World Rules Outside the PDDL Domain
+
+`domain.pddl` only knows about `move`/`pickup`/`dropoff` over `connected` tiles — it has no concept of one-way tiles, pushable boxes, or other agents. Those rules are enforced entirely on the JS side, by pruning which `(connected ...)` facts get emitted into `problem.pddl` in the first place (`buildWalkableTiles` / `buildConnectivity`), plus some handling at execution time.
+
+#### Directional tiles ("arrows")
+Tiles of type `↑`/`↓`/`←`/`→` can only be entered while moving in the direction the arrow allows. `isDirectionalMoveAllowed(fromTile, toTile)` checks this for every candidate edge in `buildConnectivity()`; a disallowed edge is simply never written as `(connected ...)`, so the planner can't route through it the wrong way.
+
+#### Pushable gates/boxes
+A `GATE_BLOCKED` (`"5!"`) tile models a box occupying a cell. `isBoxPushable(bx, by, dx, dy)` allows an edge into that tile only if the cell one step further along the same direction is `GATE_OPEN` (`"5"`) — i.e. there's room to push the box into. `buildWalkableTiles()`/`buildConnectivity()` use this to decide whether a gate tile (and the edges into it) belong in the PDDL problem at all. When `executeNextAction()` actually steps onto a `GATE_BLOCKED` tile, `applyBoxPush(...)` patches `tileMap` after the fact (the entered tile becomes `GATE_OPEN`, the tile behind becomes `GATE_BLOCKED`) and flags `worldChangedSinceLastPlan` so the next problem reflects the box's new position.
+
+#### Dynamic obstacles (other agents)
+If a `move` fails unexpectedly in `executeNextAction()` (most likely another agent standing on the target tile), `setDynamicObstacle(x, y)` marks that tile as blocked for `DYNAMIC_OBSTACLE` ms. While marked, `buildWalkableTiles()` and `buildConnectivity()` exclude it from the PDDL problem entirely, so replans route around it instead of retrying the same failing step. The mark expires automatically via `setTimeout`.
