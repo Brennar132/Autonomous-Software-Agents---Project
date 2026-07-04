@@ -366,46 +366,69 @@ async function searchForParcels() {
   console.log("---- SEARCH FOR PARCELS ----");
   if (parcels.size > 0) return "There are already visible parcels. No need to search.";
 
-  const sorted = [...spawnPoints.values()]
-    .sort((a, b) => (Math.abs(a.x-me.x)+Math.abs(a.y-me.y)) - (Math.abs(b.x-me.x)+Math.abs(b.y-me.y)));
+  // Rank spawn points by ACTUAL path cost (A* length), not Manhattan distance.
+  const start = { x: me.x, y: me.y };
+  const ranked = [...spawnPoints.values()]
+    .map(s => {
+      const path = aStar(start, { x: s.x, y: s.y }, new Set(activeRules.forbiddenTiles));
+      return { spawn: s, cost: path ? path.length : Infinity };
+    })
+    .filter(e => e.cost !== Infinity)          // drop unreachable spawns
+    .sort((a, b) => a.cost - b.cost);
 
-  for (const spawn of sorted) {
-    console.log(`Trying spawn (${spawn.x}, ${spawn.y})...`);
+  if (ranked.length === 0) return "Error: no reachable spawn points found.";
+
+  for (const { spawn, cost } of ranked) {
+    console.log(`Trying spawn (${spawn.x}, ${spawn.y}), path cost ${cost}...`);
     const result = await navigateTo(`${spawn.x},${spawn.y}`);
-    if (result.startsWith("Arrived")) return result;
-    console.log(`Spawn (${spawn.x},${spawn.y}) unreachable: ${result}`);
+
+    // If we sensed parcels at any point during the walk, stop searching immediately.
+    if (parcels.size > 0) {
+      return `Found parcel(s) while en route to spawn (${spawn.x}, ${spawn.y}).`;
+    }
+    if (result.startsWith("Arrived")) { 
+      // arrived but still nothing sensed here — try the next spawn
+      if (parcels.size > 0) return `Found parcel(s) at spawn (${spawn.x}, ${spawn.y}).`;
+      console.log(`Nothing at spawn (${spawn.x},${spawn.y}), continuing search...`);
+      continue;
+    }
+    console.log(`Spawn (${spawn.x},${spawn.y}) unreachable at run time: ${result}`);
   }
-  return "Error: no reachable spawn points found.";
+  return "Searched all reachable spawn points; no parcels found.";
 }
 
 async function collectNearbyAndDeliver() {
   console.log("---- COLLECT NEARBY PARCELS AND DELIVER ----");
 
+  const target_stack = activeRules.requiredStackSize;   // null = no constraint
   const pickedUp = [];
   const processed = [];
 
   while (true) {
+    // stop early once we've reached an exact required stack size
+    if (target_stack !== null && pickedUp.length >= target_stack) break;
+
     const candidates = [...parcels.values()]
-      .filter(p => !p.carriedBy && p.reward > 0 
+      .filter(p => !p.carriedBy && p.reward > 0
         && p.reward <= activeRules.maxParcelScore
-        && !processed.includes(p.id) && pickupCoordination[p.id] !== teamAgentId)
+        && !processed.includes(p.id)
+        && pickupCoordination[p.id] !== teamAgentId)
       .sort((a, b) => b.reward - a.reward);
 
     if (candidates.length === 0) break;
 
     const target = candidates[0];
-    processed.push(target.id); // mark before, so we never loop on it
+    processed.push(target.id);
 
-    //Ask friendly team mates if they are doing this pickup to avoid collisions
     if (teamAgentId) {
       const response = await socket.emitAsk(teamAgentId, { action: "pickup", parcelId: target.id });
       if (!response) {
         console.log(`Team mate declined pickup for ${target.id}`);
         continue;
       }
-      pickupCoordination[target.id] = socket.id; // mark it as our target to avoid future conflicts
+      pickupCoordination[target.id] = socket.id;
     }
-  
+
     const nav = await navigateTo(`${target.x},${target.y}`);
     if (!nav.startsWith("Arrived")) {
       console.log(`Could not reach ${target.id}: ${nav}`);
@@ -421,6 +444,13 @@ async function collectNearbyAndDeliver() {
   }
 
   if (pickedUp.length === 0) return "No parcels were picked up.";
+
+  // stack-size enforcement: if we required an exact count and fell short,
+  // report it rather than silently delivering a wrong-sized stack
+  if (target_stack !== null && pickedUp.length < target_stack) {
+    return `Stack requirement not met: needed ${target_stack} parcel(s) but only collected ${pickedUp.length} (${pickedUp.join(", ")}). ` +
+           `Not delivering — waiting for more parcels may be required, or the requirement should be lowered.`;
+  }
 
   const dropNav = await navigateToClosestDropoff();
   if (!dropNav.startsWith("Arrived")) {
@@ -448,54 +478,44 @@ function aStar(start, goal, blocked = new Set()) {
     const startKey = key(start.x, start.y);
     gScore.set(startKey, 0);
     fScore.set(startKey, heuristic(start, goal));
-    open.push({x: start.x, y: start.y});
+    open.push({ x: start.x, y: start.y });
 
     while (open.length > 0) {
         open.sort((a, b) => fScore.get(key(a.x, a.y)) - fScore.get(key(b.x, b.y)));
         const current = open.shift();
         const currentKey = key(current.x, current.y);
-        closed.add(currentKey);
 
         if (current.x === goal.x && current.y === goal.y)
             return reconstructPath(cameFrom, current);
 
-        for (const neighbor of [
-            {x: current.x + 1, y: current.y},
-            {x: current.x - 1, y: current.y},
-            {x: current.x, y: current.y + 1},
-            {x: current.x, y: current.y - 1}
-        ]) {
+        closed.add(currentKey);
+
+        const neighbors = [
+            { x: current.x + 1, y: current.y },
+            { x: current.x - 1, y: current.y },
+            { x: current.x, y: current.y + 1 },
+            { x: current.x, y: current.y - 1 },
+        ];
+
+        for (const neighbor of neighbors) {
             const neighborKey = key(neighbor.x, neighbor.y);
-            const tentativeG = gScore.get(currentKey) + 1;
 
             if (closed.has(neighborKey)) continue;
 
             const isGoal = (neighbor.x === goal.x && neighbor.y === goal.y);
 
-            // avoid tiles a blocker is occupying (don't enter even if it's the goal)
+            // a blocker (teammate/opponent) occupies this tile — never enter, even if it's the goal
             if (blocked.has(neighborKey)) continue;
 
+            // walls / non-walkable rejected, but allow stepping onto the goal tile itself
             if (!isWalkable(neighbor.x, neighbor.y) && !isGoal) continue;
 
-            for (const neighbor of [
-            {x: current.x + 1, y: current.y},
-            {x: current.x - 1, y: current.y},
-            {x: current.x, y: current.y + 1},
-            {x: current.x, y: current.y - 1}
-             ]) {
-              if (!isWalkable(neighbor.x, neighbor.y)) continue;
-
-              // NEW: respect arrow direction during path planning
-              const fromTile = tileMap.get(`${current.x}_${current.y}`) || { x: current.x, y: current.y, type: '3' };
-              const toTile   = tileMap.get(`${neighbor.x}_${neighbor.y}`) || { x: neighbor.x, y: neighbor.y, type: '3' };
-              if (!MoveIsAllowed(fromTile, toTile)) continue;
-            }
-
-            const currentTile = tileMap.get(currentKey);
-            const neighborTile = tileMap.get(neighborKey) || { x: neighbor.x, y: neighbor.y, type: '3' };
-            const fromTile = tileMap.get(`${current.x}_${current.y}`) || { x: current.x, y: current.y, type: '3' };
+            // directional-tile constraint: arrow on destination forces entry direction
+            const fromTile = tileMap.get(currentKey)  || { x: current.x,  y: current.y,  type: '3' };
             const toTile   = tileMap.get(neighborKey) || { x: neighbor.x, y: neighbor.y, type: '3' };
             if (!MoveIsAllowed(fromTile, toTile)) continue;
+
+            const tentativeG = gScore.get(currentKey) + 1;
 
             if (!gScore.has(neighborKey) || tentativeG < gScore.get(neighborKey)) {
                 cameFrom.set(neighborKey, current);
@@ -521,6 +541,8 @@ function MoveIsAllowed(fromTile, toTile) {
   if (!fromTile || !toTile) return true;
   const dx = toTile.x - fromTile.x;
   const dy = toTile.y - fromTile.y;
+  // Arrow on the DESTINATION tile forces the direction of entry.
+  // Movement model: up = y+1, down = y-1, right = x+1, left = x-1.
   if (toTile.type === '→' && dx !== 1)  return false;
   if (toTile.type === '←' && dx !== -1) return false;
   if (toTile.type === '↑' && dy !== 1)  return false;
@@ -601,22 +623,23 @@ function isWalkable(x, y) {
     return true;                   // 1, 2, 3, arrows all walkable
 }
 
-async function navigateToClosestDropoff(input) {
-    console.log("Navigating to closest dropoff...");
-    if (dropoffs.size === 0) return "Error: no dropoff zones discovered yet.";
-    if (me.x === null || me.y === null) return "Error: agent position is not available yet.";
+async function navigateToClosestDropoff() {
+    console.log("Navigating to best dropoff (reward-aware)...");
+    if (dropoffs.size === 0) return "Error: no dropoff zones known.";
+    if (me.x === null || me.y === null) return "Error: agent position unknown.";
 
-    let closest = null;
-    let minDist = Infinity;
-    for (const dropoff of dropoffs.values()) {
-        const dist = Math.abs(dropoff.x - me.x) + Math.abs(dropoff.y - me.y);
-        if (dist < minDist) {
-            minDist = dist;
-            closest = dropoff;
-        }
+    let best = null;
+    let bestScore = -Infinity;
+    for (const d of dropoffs.values()) {
+        const mult = tileRewardMultiplier(d.x, d.y);
+        if (mult <= 0) continue;                       // skip 0/negative-reward dropoffs entirely
+        const dist = Math.abs(d.x - me.x) + Math.abs(d.y - me.y) + 1;   // +1 avoids /0
+        const score = mult / dist;                     // reward per step
+        if (score > bestScore) { bestScore = score; best = d; }
     }
-    if (!closest) return "Error: no reachable dropoff zones found.";
-    return navigateTo(`${closest.x},${closest.y}`);
+    if (!best) return "Error: no profitable dropoff available under current rules.";
+    console.log(`Best dropoff (${best.x},${best.y}), multiplier ${tileRewardMultiplier(best.x, best.y)}x`);
+    return navigateTo(`${best.x},${best.y}`);
 }
 
 async function navigateToClosestSpawn(input) {
@@ -673,6 +696,12 @@ async function setMaxParcelScore(input) {
   activeRules.maxParcelScore = Number(input);
   return `Ignoring parcels with higher score than ${Number(input)}.`;
 }
+
+function tileRewardMultiplier(x, y) {
+  const override = activeRules.tileRewardOverrides.get(`${x}_${y}`);
+  return override === undefined ? 1 : override;
+}
+
 
 // ==========================================
 // 3.5 Tool Registry
@@ -811,8 +840,8 @@ Available tools:
 
 
 Movement rules:
-- move(up) decreases y by 1
-- move(down) increases y by 1
+- move(up) increases y by 1
+- move(down) decreases y by 1
 - move(right) increases x by 1
 - move(left) decreases x by 1
 - move can move only one step at a time
@@ -889,8 +918,8 @@ Available tools:
 - set_max_parcel_score(n): ignore parcels with reward above n
 
 Movement rules:
-- move(up) decreases y by 1
-- move(down) increases y by 1
+- move(up) increases y by 1
+- move(down) decreases y by 1
 - move(right) increases x by 1
 - move(left) decreases x by 1
 - move can move only one step at a time
