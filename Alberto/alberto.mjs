@@ -364,28 +364,18 @@ async function deliverParcel() {
 
 async function searchForParcels() {
   console.log("---- SEARCH FOR PARCELS ----");
+  if (parcels.size > 0) return "There are already visible parcels. No need to search.";
 
-  if (parcels.size > 0) {
-    return "There are already visible parcels. No need to search.";
+  const sorted = [...spawnPoints.values()]
+    .sort((a, b) => (Math.abs(a.x-me.x)+Math.abs(a.y-me.y)) - (Math.abs(b.x-me.x)+Math.abs(b.y-me.y)));
+
+  for (const spawn of sorted) {
+    console.log(`Trying spawn (${spawn.x}, ${spawn.y})...`);
+    const result = await navigateTo(`${spawn.x},${spawn.y}`);
+    if (result.startsWith("Arrived")) return result;
+    console.log(`Spawn (${spawn.x},${spawn.y}) unreachable: ${result}`);
   }
-  
-  let closestSpawn = null;
-  let minDist = Infinity;
-
-  for (const spawn of spawnPoints.values()) {
-    const dist = Math.abs(spawn.x - me.x) + Math.abs(spawn.y - me.y);
-    if (dist < minDist) {
-      minDist = dist;
-      closestSpawn = spawn;
-    }
-  }
-  if (!closestSpawn) {
-    return "Error: no known spawn points to search for parcels.";
-  }
-console.log(`Searching for parcels by navigating to closest spawn point at (${closestSpawn.x}, ${closestSpawn.y})...`);
-return await navigateTo(`${closestSpawn.x},${closestSpawn.y}`);
-
-
+  return "Error: no reachable spawn points found.";
 }
 
 async function collectNearbyAndDeliver() {
@@ -487,9 +477,25 @@ function aStar(start, goal, blocked = new Set()) {
 
             if (!isWalkable(neighbor.x, neighbor.y) && !isGoal) continue;
 
+            for (const neighbor of [
+            {x: current.x + 1, y: current.y},
+            {x: current.x - 1, y: current.y},
+            {x: current.x, y: current.y + 1},
+            {x: current.x, y: current.y - 1}
+             ]) {
+              if (!isWalkable(neighbor.x, neighbor.y)) continue;
+
+              // NEW: respect arrow direction during path planning
+              const fromTile = tileMap.get(`${current.x}_${current.y}`) || { x: current.x, y: current.y, type: '3' };
+              const toTile   = tileMap.get(`${neighbor.x}_${neighbor.y}`) || { x: neighbor.x, y: neighbor.y, type: '3' };
+              if (!MoveIsAllowed(fromTile, toTile)) continue;
+            }
+
             const currentTile = tileMap.get(currentKey);
             const neighborTile = tileMap.get(neighborKey) || { x: neighbor.x, y: neighbor.y, type: '3' };
-            if (!MoveIsAllowed(currentTile, neighborTile) && !isGoal) continue;
+            const fromTile = tileMap.get(`${current.x}_${current.y}`) || { x: current.x, y: current.y, type: '3' };
+            const toTile   = tileMap.get(neighborKey) || { x: neighbor.x, y: neighbor.y, type: '3' };
+            if (!MoveIsAllowed(fromTile, toTile)) continue;
 
             if (!gScore.has(neighborKey) || tentativeG < gScore.get(neighborKey)) {
                 cameFrom.set(neighborKey, current);
@@ -512,17 +518,14 @@ function reconstructPath(cameFrom, current) {
     return path.reverse();
 }
 function MoveIsAllowed(fromTile, toTile) {
-   if(!fromTile || !toTile) return true;
-
-   const dx = toTile.x - fromTile.x;
-   const dy = toTile.y - fromTile.y;
-
-   if (toTile.type === '↑' && dy !== -1) return false;
-   if (toTile.type === '↓' && dy !== 1)  return false;
-   if (toTile.type === '←' && dx !== -1) return false;
-   if (toTile.type === '→' && dx !== 1)  return false;
-   
-   return true;
+  if (!fromTile || !toTile) return true;
+  const dx = toTile.x - fromTile.x;
+  const dy = toTile.y - fromTile.y;
+  if (toTile.type === '→' && dx !== 1)  return false;
+  if (toTile.type === '←' && dx !== -1) return false;
+  if (toTile.type === '↑' && dy !== 1)  return false;
+  if (toTile.type === '↓' && dy !== -1) return false;
+  return true;
 }
 
 async function followPath(start, goal, getPosition, maxRetries = 8) {
@@ -591,10 +594,11 @@ async function navigateTo(input) {
   return await followPath(start, goal, getMyPosition);
 }
 function isWalkable(x, y) {
-    const key = `${x}_${y}`;
-    const tile = tileMap.get(key);
-    // Only allow tiles that are clearly marked as walkable
-    return tile && (tile.type === '1' || tile.type === '2' || tile.type === '3');
+    if (x < 0 || y < 0) return false;
+    const tile = tileMap.get(`${x}_${y}`);
+    if (!tile) return true;        // unknown = walkable, followPath self-corrects
+    if (tile.type === '0') return false;   // wall = only hard block
+    return true;                   // 1, 2, 3, arrows all walkable
 }
 
 async function navigateToClosestDropoff(input) {
@@ -726,8 +730,8 @@ function extractAction(text) {
     return null;
   }
 
-  return {
-    action: actionMatch[1].trim(),
+  return { 
+    action: actionMatch[1].trim().replace(/\(\)$/, ""), 
     actionInput: actionInputMatch[1].trim(),
   };
 }
