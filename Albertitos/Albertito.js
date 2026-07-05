@@ -25,7 +25,8 @@ const CONFIG = {
     LIMITS: {
         MAX_RETRIES: 5,
         MAX_CARRIED_PARCELS: 6,
-        MARGINAL_DIST_THRESHOLD: 6
+        MARGINAL_DIST_THRESHOLD: 6,
+        PICKUP_SWITCH_MARGIN: 10
     },
     TILE_TYPES: {
         WALL: "0",
@@ -439,6 +440,22 @@ function optionsGeneration() {
 
     if (chain && chain.length > 0) {
         const next = chain[0];
+
+        // Stick with the parcel already being chased unless the new pick is
+        // clearly better — avoids swapping targets mid-approach and missing
+        // a parcel we were about to reach.
+        if (currentIntention && currentIntention.predicate[0] === 'go_pick_up' && currentIntention.predicate[3] !== next.id) {
+            const currentId = currentIntention.predicate[3];
+            const currentParcel = parcels.get(currentId);
+            if (currentParcel && !currentParcel.carriedBy && !blacklistedParcels.has(currentId)) {
+                const currentScore = currentParcel.reward - distance(me, currentParcel) * 2;
+                const nextScore = next.reward - distance(me, next) * 2;
+                if (nextScore <= currentScore + CONFIG.LIMITS.PICKUP_SWITCH_MARGIN) {
+                    return; // keep chasing the current target
+                }
+            }
+        }
+
         const option = ['go_pick_up', next.x, next.y, next.id, next.reward];
         if (!currentTarget || option[1] !== currentTarget.x || option[2] !== currentTarget.y) {
             myAgent.push(option);
@@ -656,6 +673,9 @@ class GoPickUp extends PlanBase {
         if (this.stopped) throw ['stopped'];
 
         const parcelNow = parcels.get(id);
+        if (parcelNow && parcelNow.carriedBy === me.id) {
+            return true; // already grabbed opportunistically while en route
+        }
         if (!parcelNow || parcelNow.carriedBy) {
             throw ['parcel taken during navigation', id];
         }
@@ -709,30 +729,33 @@ class AStarMove extends PlanBase {
 
                 if (this.stopped) throw ['stopped'];
 
-             if (moved) {
-                retries = 0;
+                const arrived = me.x === next.x && me.y === next.y;
 
-                const carrying = Array.from(parcels.values()).filter(p => p.carriedBy === me.id);
-                if (carrying.length < CONFIG.LIMITS.MAX_CARRIED_PARCELS) {
-                    const parcelHere = Array.from(parcels.values()).find(
-                        p => Math.round(p.x) === next.x && Math.round(p.y) === next.y && !p.carriedBy
-                    );
-                    if (parcelHere) {
-                        const result = await socket.emitPickup();
-                        // Small pause to let the server confirm state before continuing
-                        await new Promise(res => setTimeout(res, 50))
+                if (moved || arrived) {
+                    retries = 0;
+
+                    const carrying = Array.from(parcels.values()).filter(p => p.carriedBy === me.id);
+                    if (carrying.length < CONFIG.LIMITS.MAX_CARRIED_PARCELS) {
+                        const parcelHere = Array.from(parcels.values()).find(
+                            p => Math.round(p.x) === next.x && Math.round(p.y) === next.y && !p.carriedBy
+                        );
+                        if (parcelHere) {
+                            const result = await socket.emitPickup();
+                            // Small pause to let the server confirm state before continuing
+                            await new Promise(res => setTimeout(res, 50))
+                        }
                     }
-                }
 
-                const enteredTile = tileMap.get(key(next.x, next.y));
-                if (enteredTile && enteredTile.type === CONFIG.TILE_TYPES.GATE_BLOCKED) {
-                    const dx = next.x - path[i - 1].x;
-                    const dy = next.y - path[i - 1].y;
-                    applyBoxPush(next.x, next.y, dx, dy);
-                }
+                    const enteredTile = tileMap.get(key(next.x, next.y));
+                    if (enteredTile && enteredTile.type === CONFIG.TILE_TYPES.GATE_BLOCKED) {
+                        const dx = next.x - path[i - 1].x;
+                        const dy = next.y - path[i - 1].y;
+                        applyBoxPush(next.x, next.y, dx, dy);
+                    }
 
-                await new Promise(res => setTimeout(res, 20));
-            }else {
+                    await new Promise(res => setTimeout(res, 20));
+                }
+                else {
                     retries++;
                     const targetTile = tileMap.get(key(next.x, next.y));
 
