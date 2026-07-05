@@ -667,6 +667,16 @@ async function navigateToClosestSpawn(input) {
     return navigateTo(`${closest.x},${closest.y}`);
 }
 
+function nearestOddRow() {
+  let best = null, bestDist = Infinity;
+  for (const t of tileMap.values()) {
+    if (t.type === '0') continue;               // wall
+    if (Math.round(t.y) % 2 !== 1) continue;    // odd rows only
+    const d = Math.abs(t.x - me.x) + Math.abs(t.y - me.y);
+    if (d < bestDist) { bestDist = d; best = t; }
+  }
+  return best;
+}
 
 // ==========================================
 // 3.3 Communication Tools
@@ -684,39 +694,80 @@ async function approchAndRelease(_input){
   const partner = teamMessages.get(teamAgentId);
   if(!partner) return "Error: no position information for team mate.";
 
-  //1 tell teammate to wait
-  socket.emitSay(teamAgentId, { type: 'freeze'});
+  socket.emitSay(teamAgentId, { type: 'freeze' });
   console.log(`Sent freeze command to teammate ${teamAgentId}.`);
+  // give Albertito a moment to actually stop and stop broadcasting
+  await new Promise(r => setTimeout(r, 400));
 
-  //2 Walk to within distance 3 of teammate
-  const target = { x: partner.x, y: partner.y };
-  const dist = () => Math.abs(me.x - target.x) + Math.abs(me.y - target.y);
-  let guard = 0;
+  const partnerNow = teamMessages.get(teamAgentId) || partner;
+  const tx = Math.round(partnerNow.x), ty = Math.round(partnerNow.y);
 
-  while (dist() > 3) {
-    if (guard++ > 200){
-      socket.emitSay(teamAgentId, { type: 'resume'});
-      return 'Error: could not reach teammate within 200 steps.';
-    }
-
-
-    const path = aStar({ x: me.x, y: me.y }, target, new Set(activeRules.forbiddenTiles));
-    if (!path || path.length < 2) {
-      await new Promise(r => setTimeout(r, 500));
-      continue;
-    }
-    const to = path[1];
-    const dx = to.x - me.x;
-    const dir = dx === 1 ? "right" : dx === -1 ? "left" : to.y > me.y ? "up"  : "down";
-    const r = await move(dir);
-    if (r.startsWith("Error")) {
-      await new Promise(r => setTimeout(r, 500));
-    }
-   
+  // already close enough?
+  if (Math.abs(me.x - tx) + Math.abs(me.y - ty) <= 3) {
+    socket.emitSay(teamAgentId, { type: 'resume' });
+    return `Already within distance 3 of teammate (${tx},${ty}). Released.`;
   }
-  socket.emitSay(teamAgentId, { type: 'resume'});
-  return 'Reached teammate and sent resume command.';
+
+  // Find a walkable tile within distance 3 of the teammate that ISN'T his tile,
+  // pick the one closest to me, and navigate there using the robust followPath.
+  const candidates = [];
+  for (let dx = -3; dx <= 3; dx++) {
+    for (let dy = -3; dy <= 3; dy++) {
+      if (Math.abs(dx) + Math.abs(dy) > 3) continue;   // Manhattan ≤ 3
+      if (dx === 0 && dy === 0) continue;              // not his own tile
+      const cx = tx + dx, cy = ty + dy;
+      if (!isWalkable(cx, cy)) continue;
+      candidates.push({ x: cx, y: cy });
+    }
+  }
+  candidates.sort((a, b) =>
+    (Math.abs(me.x - a.x) + Math.abs(me.y - a.y)) -
+    (Math.abs(me.x - b.x) + Math.abs(me.y - b.y)));
+
+  let arrived = false;
+  for (const c of candidates) {
+    const nav = await followPath({ x: me.x, y: me.y }, { x: c.x, y: c.y }, getMyPosition);
+    if (nav.startsWith("Arrived")) { arrived = true; break; }
+    // else try next-closest candidate
+  }
+
+  socket.emitSay(teamAgentId, { type: 'resume' });
+  return arrived
+    ? `Reached within distance 3 of teammate (${tx},${ty}). Released.`
+    : `Could not reach within distance 3 of teammate (${tx},${ty}); released anyway.`;
 }
+
+async function redLight(_input) {
+  console.log("---- RED LIGHT GREEN LIGHT ----");
+  if (!teamAgentId) return "Error: no teammate specified.";
+
+  // 1. tell teammate to go to an odd row and hold
+  socket.emitSay(teamAgentId, { type: 'redlight' });
+  console.log("Sent redlight to teammate.");
+
+  // 2. walk myself to the nearest walkable odd row
+  const isOdd = () => Math.round(me.y) % 2 === 1;
+  if (!isOdd()) {
+    const target = nearestOddRow();
+    if (!target) {
+      socket.emitSay(teamAgentId, { type: 'greenlight' });  // don't strand him
+      return "Error: no reachable odd row; released teammate.";
+    }
+    const nav = await followPath({ x: me.x, y: me.y }, { x: target.x, y: target.y }, getMyPosition);
+    if (!nav.startsWith("Arrived") && !isOdd()) {
+      socket.emitSay(teamAgentId, { type: 'greenlight' });
+      return `Could not reach an odd row (${nav}); released teammate.`;
+    }
+  }
+  return 'Red light sent waitinf for green light'
+}
+
+async function greenLight(_input) {
+  if(!teamAgentId) return "Error: no teammate found"
+  socket.emitSay(teamAgentId, {type: 'greenlight'})
+  return "Green light given agents can move"
+}
+
 // ==========================================
 // 3.4 Game Strategy Adaption
 // ==========================================
@@ -774,7 +825,9 @@ const TOOLS = {
   set_delivery_stack_size: setDeliveryStackSize,
   set_tile_reward: setTileReward,
   set_max_parcel_score: setMaxParcelScore,
-  approach_and_release: approchAndRelease
+  approach_and_release: approchAndRelease,
+  red_light: redLight,
+  green_light:greenLight
 };
 // ==========================================
 // 4. Reusable LLM call
@@ -885,8 +938,8 @@ Available tools:
 - set_tile_reward(x,y,mult): delivering on tile (x,y) pays mult times normal. Input format: "x,y,mult"
 - set_max_parcel_score(n): ignore parcels with reward above n
 - approach_and_release(): tells the teammate to stop, moves this agent to within distance 3 of him, then tells him to resume. Takes no meaningful input.
-
-
+- red_light(): tells the teammate and this agent to move to an odd-numbered row, and hold. Takes no input.
+- green_light(): tells the teammate and this agent to resume moving. Takes no input
 Movement rules:
 - move(up) increases y by 1
 - move(down) decreases y by 1
@@ -900,7 +953,6 @@ Movement rules:
 - navigate_to_closest_dropoff(): navigates to the nearest known dropoff point automatically
 - navigate_to_closest_spawn(): navigates to the nearest known spawn point automatically
 - When the user asks to navigate to the "closest" dropoff or spawn, use these tools directly — no manual distance calculation needed.
-
 
 Rules:
 - ANY request to "approach the teammate", "go to Albertito", "freeze him and come over", or similar MUST use exactly one step: ["approach_and_release()"].
@@ -935,7 +987,9 @@ Return exactly this JSON shape:
   ["search_for_parcels()", "collect_nearby_and_deliver()"]
   Never emit individual pick_up() or deliver_parcel() steps for multi-parcel collection.
 - tell_team_mate(message): sends a message to the teammate agent (use for sharing position or coordinating)
-`.trim();
+- ANY request to start "red light" / "move to odd rows and wait" MUST use exactly one step: ["red_light()"].
+- ANY request to end it / "green light" / "resume" / "we're done" MUST use exactly one step: ["green_light()"].
+- If the user asks for both in one message (e.g. "red light, wait N seconds, then green light"), emit ["red_light()", "green_light()"] — the pause between them is handled by the user.`.trim();
 
 const EXECUTOR_PROMPT = `
 You are an executor module inside an AI agent connected to a DeliverooJS environment.
@@ -966,7 +1020,8 @@ Available tools:
 - set_tile_reward(x,y,mult): delivering on tile (x,y) pays mult times normal. Input format: "x,y,mult"
 - set_max_parcel_score(n): ignore parcels with reward above n
 - approach_and_release(): tells the teammate to stop, moves this agent to within distance 3 of him, then tells him to resume. Takes no meaningful input.
-
+- red_light(): tells the teammate and this agent to move to an odd-numbered row, and hold. Takes no input.
+- green_light(): tells the teammate and this agent to resume moving. Takes no input
 Movement rules:
 - move(up) increases y by 1
 - move(down) decreases y by 1

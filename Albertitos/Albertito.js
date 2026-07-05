@@ -55,9 +55,7 @@ const blacklistedParcels = new Map();
 const recentlyVisited = new Map();
 let lastExplorationUpdate = 0;
 let frozen = false;
-
-// console.log("Söker Handslag :C");
-// socket.onConnect(() => console.log("Handslag!"));
+let redlight = false;
 
 // ==========================================
 // EVENT HANDLERS
@@ -169,6 +167,17 @@ socket.onMsg(async (id, name, msg, reply) => {
     }else if(msg?.type === 'resume'){
         frozen = false;
         console.log(`[FREEZE] Received resume command from Alberto`);
+        return;        
+    }else if(msg?.type === 'redlight'){
+        redlight = true;
+        console.log(`[REDLIGHT] Received redlight command from Alberto`);
+        const current = myAgent.intention_queue[0];
+        if(current) current.stop();
+        myAgent.push(['go_to_odd_row'])
+        return;        
+    }else if(msg?.type === 'greenlight'){
+        redlight = false;
+        console.log(`[REDLIGHT] Green light`);
         return;        
     }
 });
@@ -328,6 +337,16 @@ function nearestDropoff() {
     }
     return best;
 }
+function nearestOddRowTile() {
+    let best = null, bestDist = Infinity;
+    for (const t of tileMap.values()) {
+        if (t.type === CONFIG.TILE_TYPES.WALL) continue;
+        if (Math.round(t.y) % 2 !== 1) continue;      // odd rows only
+        const d = distance(me, t);
+        if (d < bestDist) { bestDist = d; best = t; }
+    }
+    return best;
+}
 
 function getSpawnZoneDensity(cx, cy, radius = 4) {
     let count = 0;
@@ -387,6 +406,10 @@ function getBestPickupChain() {
 function optionsGeneration() {
     if (frozen) {
         console.log("[OPTIONS] Agent is frozen, skipping options generation.");
+        return;
+    }
+    if (redlight) {
+        console.log("[OPTIONS] Agent is at a red light, skipping options generation.");
         return;
     }
     const carrying = Array.from(parcels.values()).filter(p => p.carriedBy === me.id);
@@ -824,7 +847,24 @@ class GoToDiscover extends PlanBase {
     }
 }
 
-planLibrary.push(GoPickUp, AStarMove, GoToDropoff, GoToDiscover);
+class GoToOddRow extends PlanBase {
+    static isApplicableTo(go_to_odd_row) { return go_to_odd_row === 'go_to_odd_row'; }
+
+    async execute(go_to_odd_row) {
+        // already on an odd row?
+        if (Math.round(me.y) % 2 === 1) {
+            console.log('[REDLIGHT] Already on odd row', me.y);
+            return true;
+        }
+        // find nearest walkable odd-row tile and go there via the existing go_to plan
+        const target = nearestOddRowTile();
+        if (!target) throw ['no reachable odd row tile'];
+        await this.subIntention(['go_to', target.x, target.y]);
+        return true;
+    }
+}
+
+planLibrary.push(GoPickUp, AStarMove, GoToDropoff, GoToDiscover, GoToOddRow);
 
 const myAgent = new IntentionRevisionReplace();
 (async () => {
