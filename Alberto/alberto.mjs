@@ -677,7 +677,46 @@ async function tellTeamMate(msg) {
   await socket.emitSay(teamAgentId, msg);
   return "Message sent to team mate.";
 }
+async function approchAndRelease(_input){
+  console.log("---- APPROACH TEAMMATE ----");
+  if(!teamAgentId) return "Error: no team agent ID specified for communication.";
 
+  const partner = teamMessages.get(teamAgentId);
+  if(!partner) return "Error: no position information for team mate.";
+
+  //1 tell teammate to wait
+  socket.emitSay(teamAgentId, { type: 'freeze'});
+  console.log(`Sent freeze command to teammate ${teamAgentId}.`);
+
+  //2 Walk to within distance 3 of teammate
+  const target = { x: partner.x, y: partner.y };
+  const dist = () => Math.abs(me.x - target.x) + Math.abs(me.y - target.y);
+  let guard = 0;
+
+  while (dist() > 3) {
+    if (guard++ > 200){
+      socket.emitSay(teamAgentId, { type: 'resume'});
+      return 'Error: could not reach teammate within 200 steps.';
+    }
+
+
+    const path = aStar({ x: me.x, y: me.y }, target, new Set(activeRules.forbiddenTiles));
+    if (!path || path.length < 2) {
+      await new Promise(r => setTimeout(r, 500));
+      continue;
+    }
+    const to = path[1];
+    const dx = to.x - me.x;
+    const dir = dx === 1 ? "right" : dx === -1 ? "left" : to.y > me.y ? "up"  : "down";
+    const r = await move(dir);
+    if (r.startsWith("Error")) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+   
+  }
+  socket.emitSay(teamAgentId, { type: 'resume'});
+  return 'Reached teammate and sent resume command.';
+}
 // ==========================================
 // 3.4 Game Strategy Adaption
 // ==========================================
@@ -734,7 +773,8 @@ const TOOLS = {
   add_forbidden_tile: addForbiddenTile,
   set_delivery_stack_size: setDeliveryStackSize,
   set_tile_reward: setTileReward,
-  set_max_parcel_score: setMaxParcelScore
+  set_max_parcel_score: setMaxParcelScore,
+  approach_and_release: approchAndRelease
 };
 // ==========================================
 // 4. Reusable LLM call
@@ -844,6 +884,7 @@ Available tools:
 - set_delivery_stack_size(n): require delivering exactly n parcels at once
 - set_tile_reward(x,y,mult): delivering on tile (x,y) pays mult times normal. Input format: "x,y,mult"
 - set_max_parcel_score(n): ignore parcels with reward above n
+- approach_and_release(): tells the teammate to stop, moves this agent to within distance 3 of him, then tells him to resume. Takes no meaningful input.
 
 
 Movement rules:
@@ -862,6 +903,7 @@ Movement rules:
 
 
 Rules:
+- ANY request to "approach the teammate", "go to Albertito", "freeze him and come over", or similar MUST use exactly one step: ["approach_and_release()"].
 - Return ONLY valid JSON.
 - Do not use markdown.
 - Do not explain.
@@ -923,6 +965,7 @@ Available tools:
 - set_delivery_stack_size(n): require delivering exactly n parcels at once
 - set_tile_reward(x,y,mult): delivering on tile (x,y) pays mult times normal. Input format: "x,y,mult"
 - set_max_parcel_score(n): ignore parcels with reward above n
+- approach_and_release(): tells the teammate to stop, moves this agent to within distance 3 of him, then tells him to resume. Takes no meaningful input.
 
 Movement rules:
 - move(up) increases y by 1

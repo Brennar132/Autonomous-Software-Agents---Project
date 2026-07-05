@@ -54,6 +54,7 @@ const dynamicObstacles = new Map();
 const blacklistedParcels = new Map();
 const recentlyVisited = new Map();
 let lastExplorationUpdate = 0;
+let frozen = false;
 
 // console.log("Söker Handslag :C");
 // socket.onConnect(() => console.log("Handslag!"));
@@ -159,6 +160,16 @@ socket.onMsg(async (id, name, msg, reply) => {
         teammate.lastSeen = Date.now();
         if(msg.x >= 0 && msg.y >= 0) setDynamicObstacle(msg.x, msg.y, 800);
         console.log(`[COMMS] Received position update from Alberto: (${msg.x}, ${msg.y})`);
+    }else if(msg?.type === 'freeze'){
+        frozen = true;
+        console.log(`[FREEZE] Received freeze command from Alberto`);
+        const current = myAgent.intention_queue[0];
+        if(current) current.stop();
+        return;        
+    }else if(msg?.type === 'resume'){
+        frozen = false;
+        console.log(`[FREEZE] Received resume command from Alberto`);
+        return;        
     }
 });
 
@@ -374,6 +385,10 @@ function getBestPickupChain() {
 // ==========================================
 
 function optionsGeneration() {
+    if (frozen) {
+        console.log("[OPTIONS] Agent is frozen, skipping options generation.");
+        return;
+    }
     const carrying = Array.from(parcels.values()).filter(p => p.carriedBy === me.id);
     const totalCarryingReward = carrying.reduce((sum, p) => sum + p.reward, 0);
     const nearest = nearestDropoff();
