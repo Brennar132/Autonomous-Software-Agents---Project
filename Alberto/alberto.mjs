@@ -121,8 +121,7 @@ const pickupCoordination = {};
 const teamMessages = new Map(); 
 let missionBusy = false; // Guard against concurrent missions aka having multiple runAgentTurn() calls at the same time
 const carrying = new Set();   // parcel ids Alberto is currently holding
-
-
+const handoff = { ready: false, x: null, y: null, count: 0, reqId: 0};
 
 function isPickupMsg(msg) {
   return typeof msg === 'object' && msg !== null && msg.action === 'pickup' && 'parcelId' in msg;
@@ -175,6 +174,17 @@ socket.onMsg(async (id, name, msg, reply) => {
     } finally {
       missionBusy = false;
     }
+    return;
+  }
+  if (msg?.type === 'handoff_ready') {
+    if (msg.reqId !== handoff.reqId) {
+      return;
+    }
+    handoff.ready = true;
+    handoff.x = msg.x;
+    handoff.y = msg.y;
+    handoff.count = msg.count ?? 0;
+    console.log('[HANDOFF] Albertito left parcels in', handoff.x, handoff.y, 'count:', handoff.count);
     return;
   }
 });
@@ -677,7 +687,30 @@ function nearestOddRow() {
   }
   return best;
 }
-
+function nearestHandoffTile() {
+  // adjacent tiles to me, in preference order
+  const neighbors = [
+    { x: me.x + 1, y: me.y },
+    { x: me.x - 1, y: me.y },
+    { x: me.x, y: me.y + 1 },
+    { x: me.x, y: me.y - 1 },
+  ];
+  for (const n of neighbors) {
+    if (isWalkable(n.x, n.y) && !dropoffs.has(key(n.x, n.y))) {
+      return n;   // a tile next to me, not my own, not a dropoff
+    }
+  }
+  // fallback: nearest walkable non-dropoff tile that isn't my own tile
+  let best = null, bestDist = Infinity;
+  for (const t of tileMap.values()) {
+    if (t.type === '0') continue;
+    if (dropoffs.has(key(t.x, t.y))) continue;
+    if (t.x === me.x && t.y === me.y) continue;   // never my own tile
+    const d = Math.abs(t.x - me.x) + Math.abs(t.y - me.y);
+    if (d < bestDist) { bestDist = d; best = t; }
+  }
+  return best;
+}
 // ==========================================
 // 3.3 Communication Tools
 // ==========================================
@@ -768,6 +801,38 @@ async function greenLight(_input) {
   return "Green light given agents can move"
 }
 
+async function requestFetch(input) {
+  console.log("---- REQUEST FETCH ----");
+  if (!teamAgentId) return "Error: no teammate specified.";
+
+  const budget = Number(input) > 0 ? Number(input) : 8;
+  const drop = nearestHandoffTile();
+  if (!drop) return "Error: no walkable non-dropoff tile near me for handoff.";
+
+  const reqId = Date.now();
+  handoff.ready = false;
+  handoff.reqId = reqId;
+  socket.emitSay(teamAgentId, { type: 'fetch', x: drop.x, y: drop.y, budget, reqId });
+  console.log(`Asked Albertito to fetch parcels and drop at (${drop.x}, ${drop.y}). reqId=${reqId}`);
+
+  let waited = 0;
+  while (!handoff.ready) {
+    await new Promise(r => setTimeout(r, 500));
+    if (waited++ > 240) return "Timed out waiting for Albertito to drop parcels.";  // 2 min
+  }
+
+  const nav = await navigateTo(`${handoff.x},${handoff.y}`);
+  if (!nav.startsWith("Arrived")) {
+    return `Albertito dropped ${handoff.count} parcel(s) at (${handoff.x},${handoff.y}) but I couldn't reach them: ${nav}`;
+  }
+  const pick = await pickUp();
+  if (!pick.startsWith("Picked up")) {
+    return `Reached the drop but pickup failed: ${pick}`;
+  }
+  const del = await collectNearbyAndDeliver();
+  return `Handoff complete. Picked up parcels Albertito left at (${handoff.x},${handoff.y}) and delivered. ${del}`;
+}
+
 // ==========================================
 // 3.4 Game Strategy Adaption
 // ==========================================
@@ -825,6 +890,7 @@ const TOOLS = {
   set_delivery_stack_size: setDeliveryStackSize,
   set_tile_reward: setTileReward,
   set_max_parcel_score: setMaxParcelScore,
+  request_fetch: requestFetch,
   approach_and_release: approchAndRelease,
   red_light: redLight,
   green_light:greenLight
@@ -940,6 +1006,7 @@ Available tools:
 - approach_and_release(): tells the teammate to stop, moves this agent to within distance 3 of him, then tells him to resume. Takes no meaningful input.
 - red_light(): tells the teammate and this agent to move to an odd-numbered row, and hold. Takes no input.
 - green_light(): tells the teammate and this agent to resume moving. Takes no input
+- request_fetch(budget): asks the teammate (Albertito) to go collect parcels within a distance budget, drop them at a handoff tile, and notify us; then this agent walks to that tile, picks them up, and delivers. Input is the budget number (default 8 if empty).
 Movement rules:
 - move(up) increases y by 1
 - move(down) decreases y by 1
@@ -969,6 +1036,7 @@ Rules:
 - pick_up is also a valid action to include in the plan, it picks up a parcel if the agent is on a spawn point
 - deliver_parcel is also a valid action to include in the plan, it delivers a parcel if the agent is on a dropoff point
 - When asked to search, pick up, and deliver, design plans that maximize efficiency.
+- ANY request to "send the teammate to fetch parcels", "have Albertito bring me parcels", "ask your teammate to collect and drop them near you", "go fetch" or similar MUST use exactly one step: ["request_fetch(8)"]. If the user gives a distance/budget number N, use ["request_fetch(N)"] instead.
 - If multiple parcels are likely to be found, instruct the agent to check for visible parcels, loop through picking up multiple high-reward parcels if they are nearby, and only then navigate to the closest dropoff to deliver them all.
 - If the user asks to "search for parcels", create a multi-step plan:
   1. Use search_for_parcels() to move to an investigation zone.
@@ -1022,6 +1090,7 @@ Available tools:
 - approach_and_release(): tells the teammate to stop, moves this agent to within distance 3 of him, then tells him to resume. Takes no meaningful input.
 - red_light(): tells the teammate and this agent to move to an odd-numbered row, and hold. Takes no input.
 - green_light(): tells the teammate and this agent to resume moving. Takes no input
+- If the current step is request_fetch(...), call request_fetch ONCE with the budget number as Action Input (or "8" if none given). It handles the whole fetch-and-deliver cycle internally; do not emit separate navigate/pick_up/deliver steps for it.
 Movement rules:
 - move(up) increases y by 1
 - move(down) decreases y by 1

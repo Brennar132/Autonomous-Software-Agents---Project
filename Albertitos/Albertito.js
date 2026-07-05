@@ -56,6 +56,9 @@ const recentlyVisited = new Map();
 let lastExplorationUpdate = 0;
 let frozen = false;
 let redlight = false;
+let fetchJob = null;
+let handoffReserved = null; 
+
 
 // ==========================================
 // EVENT HANDLERS
@@ -115,6 +118,13 @@ socket.onTile(({ x, y, type }) => {
 
 const key = (x, y) => `${x}_${y}`;
 const distance = (p1, p2) => Math.abs(Math.round(p1.x) - Math.round(p2.x)) + Math.abs(Math.round(p1.y) - Math.round(p2.y));
+
+function isReserved(p) {
+  return handoffReserved &&
+    Date.now() < handoffReserved.until &&
+    Math.round(p.x) === handoffReserved.x &&
+    Math.round(p.y) === handoffReserved.y;
+}
 
 function setDynamicObstacle(x, y, duration = 1500) {
     const k = key(x, y);
@@ -179,6 +189,13 @@ socket.onMsg(async (id, name, msg, reply) => {
         redlight = false;
         console.log(`[REDLIGHT] Green light`);
         return;        
+    }else if (msg?.type === 'fetch'){
+        fetchJob = { x: msg.x, y: msg.y, budget: msg.budget ?? 8, reqId: msg.reqId ?? 0 };
+        console.log(`[FETCH] Received fetch request from Alberto: (${msg.x}, ${msg.y}) budget ${fetchJob.budget} reqId ${fetchJob.reqId}`);
+        const current = myAgent.intention_queue[0];
+        if(current) current.stop();
+        myAgent.push(['do_fetch', fetchJob.x, fetchJob.y, fetchJob.budget, fetchJob.reqId]);
+        return;
     }
 });
 
@@ -358,7 +375,7 @@ function getSpawnZoneDensity(cx, cy, radius = 4) {
 
 function getBestPickupChain() {
     const freeParcels = Array.from(parcels.values())
-        .filter(p => !p.carriedBy && !blacklistedParcels.has(p.id));
+        .filter(p => !p.carriedBy && !blacklistedParcels.has(p.id) && !isReserved(p));
 
     if (freeParcels.length === 0) return null;
 
@@ -404,14 +421,11 @@ function getBestPickupChain() {
 // ==========================================
 
 function optionsGeneration() {
-    if (frozen) {
-        console.log("[OPTIONS] Agent is frozen, skipping options generation.");
+    if (frozen || fetchJob || redlight) {
+        console.log("Busy with freeze/fetch/redlight, skipping options generation");
         return;
     }
-    if (redlight) {
-        console.log("[OPTIONS] Agent is at a red light, skipping options generation.");
-        return;
-    }
+    
     const carrying = Array.from(parcels.values()).filter(p => p.carriedBy === me.id);
     const totalCarryingReward = carrying.reduce((sum, p) => sum + p.reward, 0);
     const nearest = nearestDropoff();
@@ -775,7 +789,7 @@ class AStarMove extends PlanBase {
                     const carrying = Array.from(parcels.values()).filter(p => p.carriedBy === me.id);
                     if (carrying.length < CONFIG.LIMITS.MAX_CARRIED_PARCELS) {
                         const parcelHere = Array.from(parcels.values()).find(
-                            p => Math.round(p.x) === next.x && Math.round(p.y) === next.y && !p.carriedBy
+                            p => Math.round(p.x) === next.x && Math.round(p.y) === next.y && !p.carriedBy && !isReserved(p)
                         );
                         if (parcelHere) {
                             const result = await socket.emitPickup();
@@ -864,7 +878,72 @@ class GoToOddRow extends PlanBase {
     }
 }
 
-planLibrary.push(GoPickUp, AStarMove, GoToDropoff, GoToDiscover, GoToOddRow);
+class DoFetch extends PlanBase {
+    static isApplicableTo(do_fetch) { return do_fetch === 'do_fetch'; }
+
+    async execute(do_fetch, dropX, dropY, budget, reqId) {
+        handoffReserved = null;
+        try {
+            const start = { x: Math.round(me.x), y: Math.round(me.y) };
+
+            while (true) {
+                if (this.stopped) throw ['stopped'];
+                const carrying = Array.from(parcels.values()).filter(p => p.carriedBy === me.id).length;
+                if (carrying >= CONFIG.LIMITS.MAX_CARRIED_PARCELS) break;
+
+                const target = Array.from(parcels.values())
+                    .filter(p => !p.carriedBy && !blacklistedParcels.has(p.id)
+                              && distance(start, p) <= budget)
+                    .sort((a, b) => distance(me, a) - distance(me, b))[0];
+
+                if (!target) break;
+
+                try {
+                    await this.subIntention(['go_pick_up', target.x, target.y, target.id, target.reward]);
+                } catch (e) {
+                    blacklistParcel(target.id, CONFIG.TIMEOUTS.PICKUP_BLACKLIST);
+                }
+            }
+
+            const carryingNow = Array.from(parcels.values()).filter(p => p.carriedBy === me.id).length;
+            if (carryingNow === 0) {
+                console.log('[FETCH] Nothing collected within budget.');
+                if (albertoId) socket.emitSay(albertoId, { type: 'handoff_ready', x: dropX, y: dropY, count: 0, reqId });
+                return true;
+            }
+
+            if (this.stopped) throw ['stopped'];
+            await this.subIntention(['go_to', dropX, dropY]);
+            await socket.emitPutdown();
+            handoffReserved = { x: dropX, y: dropY, until: Date.now() + 30000 };
+            for (const [id, p] of parcels.entries()) {
+                if (p.carriedBy === me.id) parcels.delete(id);
+            }
+
+            console.log(`[FETCH] Dropped ${carryingNow} parcel(s) at (${dropX}, ${dropY}). Notifying Alberto.`);
+            if (albertoId) socket.emitSay(albertoId, { type: 'handoff_ready', x: dropX, y: dropY, count: carryingNow, reqId });
+
+            fetchJob = null;
+            const stepAway = [
+                { x: dropX + 1, y: dropY }, { x: dropX - 1, y: dropY },
+                { x: dropX, y: dropY + 1 }, { x: dropX, y: dropY - 1 },
+            ].find(t => isWalkable(t.x, t.y));
+            if (stepAway) {
+                try { await this.subIntention(['go_to', stepAway.x, stepAway.y]); } catch {}
+            }
+            return true;
+
+        } catch (err) {
+            console.log('[FETCH] Aborted:', err);
+            if (albertoId) socket.emitSay(albertoId, { type: 'handoff_ready', x: dropX, y: dropY, count: 0, reqId });
+            throw err;
+        } finally {
+            fetchJob = null;
+        }
+    }
+}
+
+planLibrary.push(GoPickUp, AStarMove, GoToDropoff, GoToDiscover, GoToOddRow, DoFetch);
 
 const myAgent = new IntentionRevisionReplace();
 (async () => {
