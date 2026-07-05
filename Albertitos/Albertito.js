@@ -463,11 +463,32 @@ function optionsGeneration() {
             }
 
             if (bestPickup) {
-                const option = ['go_pick_up', bestPickup.x, bestPickup.y, bestPickup.id, bestPickup.reward];
-                if (!currentTarget || option[1] !== currentTarget.x || option[2] !== currentTarget.y) {
-                    myAgent.push(option);
-                    return;
+                const alreadyTargetingBest = currentIntention?.predicate[0] === 'go_pick_up' &&
+                    currentIntention.predicate[3] === bestPickup.id;
+
+                let shouldSwitch = true;
+                if (!alreadyTargetingBest && currentIntention?.predicate[0] === 'go_pick_up') {
+                    const currentId = currentIntention.predicate[3];
+                    const currentParcel = parcels.get(currentId);
+                    if (currentParcel && !currentParcel.carriedBy && !blacklistedParcels.has(currentId)) {
+                        const dMeToCurrent = distance(me, currentParcel);
+                        const dCurrentToDrop = distance(currentParcel, nearest);
+                        const dMeToDrop = distance(me, nearest);
+                        const currentMarginal = dMeToCurrent + dCurrentToDrop - dMeToDrop;
+                        const currentUtility = (currentParcel.reward * CONFIG.UTILITY.PICKUP_ALPHA) - (currentMarginal * CONFIG.UTILITY.PICKUP_BETA);
+                        if (bestUtility <= currentUtility + CONFIG.LIMITS.PICKUP_SWITCH_MARGIN) {
+                            shouldSwitch = false;
+                        }
+                    }
                 }
+
+                if (shouldSwitch) {
+                    const option = ['go_pick_up', bestPickup.x, bestPickup.y, bestPickup.id, bestPickup.reward];
+                    if (!currentTarget || option[1] !== currentTarget.x || option[2] !== currentTarget.y) {
+                        myAgent.push(option);
+                    }
+                }
+                return;
             }
         }
 
@@ -492,10 +513,6 @@ function optionsGeneration() {
 
     if (chain && chain.length > 0) {
         const next = chain[0];
-
-        // Stick with the parcel already being chased unless the new pick is
-        // clearly better — avoids swapping targets mid-approach and missing
-        // a parcel we were about to reach.
         if (currentIntention && currentIntention.predicate[0] === 'go_pick_up' && currentIntention.predicate[3] !== next.id) {
             const currentId = currentIntention.predicate[3];
             const currentParcel = parcels.get(currentId);
@@ -561,7 +578,7 @@ socket.onSensing(() => {
     const [type, , , id] = current.predicate;
     if (type === 'go_pick_up' && id) {
         const p = parcels.get(id);
-        if (!p || p.carriedBy) {
+        if (!p || (p.carriedBy && p.carriedBy !== me.id)) {
             console.log('[CANCEL] Parcel', id, 'no longer free — aborting chase');
             current.stop();
         }
@@ -732,7 +749,9 @@ class GoPickUp extends PlanBase {
             throw ['parcel taken during navigation', id];
         }
 
-        await socket.emitPickup();
+        const result = await socket.emitPickup();
+        if (!result) throw ['pickup failed', id];
+        parcels.set(id, { ...parcelNow, carriedBy: me.id });
         return true;
     }
 }
@@ -793,8 +812,11 @@ class AStarMove extends PlanBase {
                         );
                         if (parcelHere) {
                             const result = await socket.emitPickup();
-                            // Small pause to let the server confirm state before continuing
-                            await new Promise(res => setTimeout(res, 50))
+                            if (result) {
+                                parcels.set(parcelHere.id, { ...parcelHere, carriedBy: me.id });
+                                this.log('Opportunistic pickup of', parcelHere.id, 'at', next.x, next.y);
+                            }
+                            await new Promise(res => setTimeout(res, 50));
                         }
                     }
 
