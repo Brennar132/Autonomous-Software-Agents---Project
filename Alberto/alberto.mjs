@@ -120,6 +120,7 @@ socket.onSensing( async ( sensing ) => { // Update parcels information Delete/Ad
 const pickupCoordination = {};
 const teamMessages = new Map(); 
 let missionBusy = false; // Guard against concurrent missions aka having multiple runAgentTurn() calls at the same time
+const carrying = new Set();   // parcel ids Alberto is currently holding
 
 
 
@@ -353,11 +354,14 @@ async function pickUp() {
 async function deliverParcel() {
   console.log("---- DELIVER PARCEL ----");
   try {
-    const result = await socket.emitPutdown();  // check exact SDK name
-    if (result) return `Delivered parcel successfully: ${JSON.stringify(result)}`;
+    const result = await socket.emitPutdown();
+    if (result) {
+      carrying.clear();   // everything we held was dropped at the dropoff
+      return `Delivered parcel successfully: ${JSON.stringify(result)}`;
+    }
     return "Error: delivery failed — not at dropoff point or no parcel to deliver.";
   } catch (error) {
-    return `Error: delivery failed: ${error.message}`;  // never crash the process
+    return `Error: delivery failed: ${error.message}`;
   }
 }
 
@@ -406,7 +410,7 @@ async function collectNearbyAndDeliver() {
 
   while (true) {
     // stop early once we've reached an exact required stack size
-    if (target_stack !== null && pickedUp.length >= target_stack) break;
+    if (target_stack !== null && carrying.size >= target_stack) break;
 
     const candidates = [...parcels.values()]
       .filter(p => !p.carriedBy && p.reward > 0
@@ -437,27 +441,27 @@ async function collectNearbyAndDeliver() {
 
     const pickupResult = await pickUp();
     if (pickupResult.startsWith("Picked up")) {
+      carrying.add(target.id);
       pickedUp.push(target.id);
     } else {
       console.log(`Pickup failed for ${target.id}: ${pickupResult}`);
     }
   }
+ 
+  if (carrying.size === 0) return "No parcels available to collect or deliver.";
 
-  if (pickedUp.length === 0) return "No parcels were picked up.";
-
-  // stack-size enforcement: if we required an exact count and fell short,
-  // report it rather than silently delivering a wrong-sized stack
-  if (target_stack !== null && pickedUp.length < target_stack) {
-    return `Stack requirement not met: needed ${target_stack} parcel(s) but only collected ${pickedUp.length} (${pickedUp.join(", ")}). ` +
-           `Not delivering — waiting for more parcels may be required, or the requirement should be lowered.`;
+  if (target_stack !== null && carrying.size < target_stack) {
+    return `Stack requirement not met: need ${target_stack}, carrying ${carrying.size} (${[...carrying].join(", ")}). Not delivering.`;
   }
 
+  const deliveredCount = carrying.size;
+  const deliveredIds = [...carrying];
   const dropNav = await navigateToClosestDropoff();
   if (!dropNav.startsWith("Arrived")) {
-    return `Picked up ${pickedUp.length} parcel(s) but could not reach a dropoff: ${dropNav}`;
+    return `Carrying ${deliveredCount} parcel(s) but could not reach a dropoff: ${dropNav}`;
   }
   const del = await deliverParcel();
-  return `Picked up ${pickedUp.length} parcel(s): ${pickedUp.join(", ")}. Delivery: ${del}`;
+  return `Delivered ${deliveredCount} parcel(s): ${deliveredIds.join(", ")}. Result: ${del}`;
 }
 
 
@@ -598,10 +602,13 @@ async function followPath(start, goal, getPosition, maxRetries = 8) {
       failures = 0;
 
       //Oppurtinistic pickup: if we see a parcel on the ground at our new position, pick it up before continuing to navigate to the goal
-      const here = [...parcels.values()].find(p => p.x === to.x && p.y === to.y && !p.carriedBy);
+      const stackTarget = activeRules.requiredStackSize;
+      const stackFull = stackTarget !== null && carrying.size >= stackTarget;
+      const here = stackFull ? null : [...parcels.values()].find(p => p.x === to.x && p.y === to.y && !p.carriedBy);
       if (here) {
         const r = await pickUp();
         if (r.startsWith("Picked up")) {
+      carrying.add(here.id);
       console.log(`Opportunistic pickup of ${here.id} at (${to.x},${to.y}).`);
     }
       }
