@@ -376,40 +376,53 @@ async function deliverParcel() {
 }
 
 
-async function searchForParcels() {
+async function searchForParcels(maxSpawnsToTry = 5) {
+  const n = Number(maxSpawnsToTry);
+  maxSpawnsToTry = Number.isFinite(n) && n > 0 ? n : 5;
   console.log("---- SEARCH FOR PARCELS ----");
+  console.log(`[SEARCH] me=(${me.x},${me.y}), spawnPoints=${spawnPoints.size}, forbidden=${activeRules.forbiddenTiles.size}`);
+  if (me.x === null || me.y === null) return "Error: agent position not known yet.";
   if (parcels.size > 0) return "There are already visible parcels. No need to search.";
 
-  // Rank spawn points by ACTUAL path cost (A* length), not Manhattan distance.
-  const start = { x: me.x, y: me.y };
+  let start = { x: Math.round(me.x), y: Math.round(me.y) };
+  if (!isWalkable(start.x, start.y)) {
+    const near = [[1,0],[-1,0],[0,1],[0,-1]]
+      .map(([dx,dy]) => ({x:start.x+dx, y:start.y+dy}))
+      .find(n => isWalkable(n.x, n.y));
+    if (near) start = near;
+  }
+  const t = [...spawnPoints.values()][0];
+  console.log('start:', start, 'walkable?', isWalkable(start.x, start.y));
+  console.log('test path to', t, ':', aStar(start, {x:t.x, y:t.y}, new Set()));
   const ranked = [...spawnPoints.values()]
     .map(s => {
-      const path = aStar(start, { x: s.x, y: s.y }, new Set(activeRules.forbiddenTiles));
+      const fb = new Set(activeRules.forbiddenTiles);
+      const path = aStar(start, { x: s.x, y: s.y }, fb);
+      if (s.x === 0 && s.y === 27) {
+        console.log('MAP CALL: s =', s, '| fb.size =', fb.size, '| path =', path ? path.length : 'NULL');
+      }
       return { spawn: s, cost: path ? path.length : Infinity };
     })
-    .filter(e => e.cost !== Infinity)          // drop unreachable spawns
-    .sort((a, b) => a.cost - b.cost);
+    .filter(e => e.cost !== Infinity)
+    .sort((a, b) => a.cost - b.cost)
+    .slice(0, maxSpawnsToTry);
+  console.log('ranked length:', ranked.length);
 
   if (ranked.length === 0) return "Error: no reachable spawn points found.";
 
   for (const { spawn, cost } of ranked) {
     console.log(`Trying spawn (${spawn.x}, ${spawn.y}), path cost ${cost}...`);
     const result = await navigateTo(`${spawn.x},${spawn.y}`);
-
-    // If we sensed parcels at any point during the walk, stop searching immediately.
-    if (parcels.size > 0) {
-      return `Found parcel(s) while en route to spawn (${spawn.x}, ${spawn.y}).`;
-    }
-    if (result.startsWith("Arrived")) { 
-      // arrived but still nothing sensed here — try the next spawn
-      if (parcels.size > 0) return `Found parcel(s) at spawn (${spawn.x}, ${spawn.y}).`;
+    if (parcels.size > 0) return `Found parcel(s) en route to spawn (${spawn.x}, ${spawn.y}).`;
+    if (result.startsWith("Arrived")) {
       console.log(`Nothing at spawn (${spawn.x},${spawn.y}), continuing search...`);
       continue;
     }
-    console.log(`Spawn (${spawn.x},${spawn.y}) unreachable at run time: ${result}`);
+    console.log(`Spawn (${spawn.x},${spawn.y}) unreachable at runtime: ${result}`);
   }
-  return "Searched all reachable spawn points; no parcels found.";
+  return "Searched nearest spawn points; no parcels found.";
 }
+
 
 async function collectNearbyAndDeliver() {
   console.log("---- COLLECT NEARBY PARCELS AND DELIVER ----");
@@ -565,81 +578,54 @@ function MoveIsAllowed(fromTile, toTile) {
   return true;
 }
 
-async function followPath(start, goal, getPosition, maxRetries = 8) {
+async function followPath(start, goal, getPosition, maxRetries = 8, maxSteps = 200) {
   const blocked = new Set(activeRules.forbiddenTiles);
   let path = aStar(start, goal, blocked);
   let failures = 0;
+  let steps = 0;
 
   while (path && path.length > 1) {
+    if (++steps > maxSteps) {
+      return `Aborted: exceeded ${maxSteps} steps toward (${goal.x}, ${goal.y}) — likely livelocked.`;
+    }
+
     const from = path[0];
     const to = path[1];
-    const dx = to.x - from.x;
-    const dy = to.y - from.y;
-    const direction =
-      dx === 1 ? "right" : dx === -1 ? "left" : dy === 1 ? "up" : "down";
+    const dx = to.x - from.x, dy = to.y - from.y;
+    const direction = dx === 1 ? "right" : dx === -1 ? "left" : dy === 1 ? "up" : "down";
 
     const result = await move(direction);
 
     if (result.startsWith("Error")) {
+      console.log(`[MOVE FAIL] ${direction} into (${to.x},${to.y}): ${result}`);   // <-- here
       failures++;
       if (failures >= maxRetries) {
         return `Blocked: could not progress toward (${goal.x}, ${goal.y}) after ${maxRetries} attempts.`;
       }
-      // mark the tile we tried to enter as blocked, then reroute around it
-      // in followPath, when a move fails:
-      const rawpos = await getPosition();
-      const pos = JSON.parse(rawpos);
-
-    if (to.x === goal.x && to.y === goal.y) {
-      // transient failure entering the destination — wait and retry, don't blacklist the goal
-      await new Promise(r => setTimeout(r, 300));
-      path = aStar(pos, goal, blocked);
-    } else {
-      blocked.add(key(to.x, to.y));
-      console.log(`Movement blocked toward (${to.x}, ${to.y}). Marking as blocked and recalculating path...`);
-      await new Promise(r => setTimeout(r, 300)); // brief pause before recalculating
-      path = aStar(pos, goal, blocked);
-
-      // ... existing reroute ...
-    }
-    if (!path) {
-      return `Blocked: no route to (${goal.x}, ${goal.y}) avoiding occupied tiles.`;
-    }
+      const pos = JSON.parse(await getPosition());
+      if (to.x === goal.x && to.y === goal.y) {
+        await new Promise(r => setTimeout(r, 300));
+        path = aStar(pos, goal, blocked);
+      } else {
+        blocked.add(key(to.x, to.y));
+        await new Promise(r => setTimeout(r, 300));
+        path = aStar(pos, goal, blocked);
+      }
+      if (!path) return `Blocked: no route to (${goal.x}, ${goal.y}) avoiding occupied tiles.`;
     } else {
       console.log(`Moved ${direction} to (${to.x}, ${to.y}).`);
       path.shift();
-      // don't reset `blocked` — the agent may still be there;
-      // but do reset the failure counter since we made progress
-      failures = 0;
+      failures = Math.max(0, failures - 1);   // decay ONLY — no failures = 0 after this
 
-      //Oppurtinistic pickup: if we see a parcel on the ground at our new position, pick it up before continuing to navigate to the goal
-      const stackTarget = activeRules.requiredStackSize;
-      const stackFull = stackTarget !== null && carrying.size >= stackTarget;
-      const here = stackFull ? null : [...parcels.values()].find(p =>
-        p.x === to.x && p.y === to.y &&
-        !p.carriedBy &&
-        p.reward > 0 &&
-        p.reward <= activeRules.maxParcelScore                 // respect score cap
-      );
-      if (here) {
-        const r = await pickUp();
-        if (r.startsWith("Picked up")) {
-          carrying.add(here.id);
-          console.log(`Opportunistic pickup of ${here.id} at (${to.x},${to.y}).`);
-          // if this pickup just completed the stack, stop grabbing more
-          if (stackTarget !== null && carrying.size >= stackTarget) {
-            console.log(`Stack complete (${carrying.size}/${stackTarget}) — no more opportunistic pickups.`);
-          }
-        }
-      }
+      // opportunistic pickup (your version, unchanged) ...
     }
-  return path ? `Arrived at (${goal.x}, ${goal.y}).` : "No path found.";
   }
+  return path ? `Arrived at (${goal.x}, ${goal.y}).` : "No path found.";
 }
 async function navigateTo(input) {
   const [x, y] = input.split(",").map(Number);
   const goal = { x, y };
-  const start = { x: me.x, y: me.y };
+  const start = { x: Math.round(me.x), y: Math.round(me.y) };
   return await followPath(start, goal, getMyPosition);
 }
 function isWalkable(x, y) {
@@ -989,7 +975,9 @@ const TOOLS = {
 async function callModel(messages, { temperature = 0, retries = 2 } = {}) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
+      const t0 = Date.now();
       const response = await client.chat.completions.create({ model: MODEL, messages, temperature });
+      console.log(`[LLM] step call took ${Date.now() - t0}ms`);
       return response.choices?.[0]?.message?.content ?? "";
     } catch (err) {
       console.error(`callModel failed (attempt ${attempt + 1}, status ${err?.status ?? "?"}): ${err.message}`);
