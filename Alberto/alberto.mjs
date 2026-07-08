@@ -453,6 +453,7 @@ async function collectNearbyAndDeliver() {
     if (pickupResult.startsWith("Picked up")) {
       carrying.add(target.id);
       pickedUp.push(target.id);
+      if (target_stack !== null && carrying.size >= target_stack) break;
     } else {
       console.log(`Pickup failed for ${target.id}: ${pickupResult}`);
     }
@@ -676,6 +677,65 @@ async function navigateToClosestSpawn(input) {
     if (!closest) return "Error: no reachable spawn points found.";
     return navigateTo(`${closest.x},${closest.y}`);
 }
+function extremeTiles(source, direction) {
+  const tiles = [...source.values()];
+  if (tiles.length === 0) return { tiles: [], value: null };
+
+  let value, filtered;
+  switch (direction) {
+    case "left":  value = Math.min(...tiles.map(t => t.x)); filtered = tiles.filter(t => t.x === value); break;
+    case "right": value = Math.max(...tiles.map(t => t.x)); filtered = tiles.filter(t => t.x === value); break;
+    case "down":  value = Math.min(...tiles.map(t => t.y)); filtered = tiles.filter(t => t.y === value); break;
+    case "up":    value = Math.max(...tiles.map(t => t.y)); filtered = tiles.filter(t => t.y === value); break;
+    default: return { tiles: [], value: null };
+  }
+  return { tiles: filtered, value };
+}
+
+async function deliverToExtreme(input) {
+  console.log("---- EXTREME TILE RULE ----");
+  // input format: "direction,points"  e.g. "left,5" or "up,-10"
+  const [dirRaw, ptsRaw] = String(input).split(",");
+  const direction = (dirRaw || "").trim().toLowerCase();
+  const points = Number(ptsRaw);
+
+  if (!["left", "right", "up", "down"].includes(direction))
+    return `Error: invalid direction "${direction}". Use left/right/up/down.`;
+  if (Number.isNaN(points)) return `Error: could not parse points from "${ptsRaw}".`;
+  if (dropoffs.size === 0) return "Error: no dropoff zones known.";
+
+  const { tiles, value } = extremeTiles(dropoffs, direction);
+  if (tiles.length === 0) return `Error: no ${direction}most dropoff found.`;
+
+  if (points < 0) {
+    for (const t of tiles) activeRules.forbiddenTiles.add(key(t.x, t.y));
+    console.log(`Blacklisted ${tiles.length} ${direction}most tile(s) at ${value}.`);
+    const nav = await navigateToClosestDropoff();
+    if (!nav.startsWith("Arrived"))
+      return `${direction}most tile penalized (${points}pt); no reachable alternative: ${nav}`;
+    const del = await deliverParcel();
+    return `${direction}most tile would cost ${points}pt — avoided it, delivered elsewhere. ${del}`;
+  }
+ 
+  const ranked = tiles
+    .map(t => {
+      const path = aStar({ x: me.x, y: me.y }, { x: t.x, y: t.y }, new Set(activeRules.forbiddenTiles));
+      return { tile: t, cost: path ? path.length : Infinity };
+    })
+    .filter(e => e.cost !== Infinity)
+    .sort((a, b) => a.cost - b.cost);
+
+  if (ranked.length === 0) return `Error: no reachable ${direction}most tile.`;
+
+  for (const { tile } of ranked) {
+    const nav = await navigateTo(`${tile.x},${tile.y}`);
+    if (nav.startsWith("Arrived")) {
+      const del = await deliverParcel();
+      return `Delivered on ${direction}most tile (${tile.x},${tile.y}) for +${points}pt. ${del}`;
+    }
+  }
+  return `Error: all ${direction}most tiles unreachable.`;
+}
 
 function nearestOddRow() {
   let best = null, bestDist = Infinity;
@@ -710,6 +770,22 @@ function nearestHandoffTile() {
     if (d < bestDist) { bestDist = d; best = t; }
   }
   return best;
+}
+
+async function stackDeliver(input) {
+  console.log("---- STACK DELIVER ----");
+  const n = Number(String(input).trim());
+  if (!Number.isInteger(n) || n <= 0) return `Error: invalid stack size "${input}".`;
+
+  activeRules.requiredStackSize = n;
+  console.log(`Stack rule set: deliver exactly ${n} parcels together.`);
+
+  if (parcels.size === 0) {
+    const search = await searchForParcels();
+    console.log(`Search: ${search}`); 
+  }
+  const result = await collectNearbyAndDeliver();
+  return `Exactly-${n} stack delivery: ${result}`;
 }
 // ==========================================
 // 3.3 Communication Tools
@@ -893,7 +969,9 @@ const TOOLS = {
   request_fetch: requestFetch,
   approach_and_release: approchAndRelease,
   red_light: redLight,
-  green_light:greenLight
+  green_light:greenLight,
+  deliver_to_extreme: deliverToExtreme,
+  stack_deliver: stackDeliver,
 };
 // ==========================================
 // 4. Reusable LLM call
@@ -1007,6 +1085,9 @@ Available tools:
 - red_light(): tells the teammate and this agent to move to an odd-numbered row, and hold. Takes no input.
 - green_light(): tells the teammate and this agent to resume moving. Takes no input
 - request_fetch(budget): asks the teammate (Albertito) to go collect parcels within a distance budget, drop them at a handoff tile, and notify us; then this agent walks to that tile, picks them up, and delivers. Input is the budget number (default 8 if empty).
+- ANY request phrased "Drop a package in the {leftmost|rightmost|topmost/upmost|bottommost/lowest} tile to get N pt" MUST use exactly one step: ["deliver_to_extreme(DIR,N)"], where DIR is one of left/right/up/down and N is the signed number. Map "leftmost"→left, "rightmost"→right, "topmost"/"upmost"/"highest"→up, "bottommost"/"lowest"→down. Positive N means deliver there; negative means avoid it and deliver elsewhere.
+- stack_deliver(N): sets required stack size to exactly N, then collects exactly N parcels and delivers them together. Input is the number N.
+
 Movement rules:
 - move(up) increases y by 1
 - move(down) decreases y by 1
@@ -1022,6 +1103,12 @@ Movement rules:
 - When the user asks to navigate to the "closest" dropoff or spawn, use these tools directly — no manual distance calculation needed.
 
 Rules:
+- "Deliver stacks of exactly N parcels ... to double/get M of the reward" → exactly one step: ["stack_deliver(N)"].
+- "Every time you deliver in (X,Y) [or (X2,Y2)] you get Kx pts" → one set_tile_reward step per tile: ["set_tile_reward(X,Y,K)", "set_tile_reward(X2,Y2,K)"].
+- "Every time you deliver in (X,Y) you get 0 pts" → ["set_tile_reward(X,Y,0)"].
+- "If you deliver parcels with a score higher than N, you get no reward" → ["set_max_parcel_score(N)"].
+- "Do not go through tile (X,Y)" / "avoid tile (X,Y)" → ["add_forbidden_tile(X,Y)"].
+- stack_deliver(N): sets required stack size to exactly N, then collects exactly N parcels and delivers them together. Input is the number N.
 - ANY request to "approach the teammate", "go to Albertito", "freeze him and come over", or similar MUST use exactly one step: ["approach_and_release()"].
 - Return ONLY valid JSON.
 - Do not use markdown.
@@ -1091,6 +1178,8 @@ Available tools:
 - red_light(): tells the teammate and this agent to move to an odd-numbered row, and hold. Takes no input.
 - green_light(): tells the teammate and this agent to resume moving. Takes no input
 - If the current step is request_fetch(...), call request_fetch ONCE with the budget number as Action Input (or "8" if none given). It handles the whole fetch-and-deliver cycle internally; do not emit separate navigate/pick_up/deliver steps for it.
+- deliver_to_extreme(DIR,N): DIR is left/right/up/down. Positive N navigates to the nearest reachable extreme dropoff tile in that direction and delivers. Negative N blacklists those tiles and delivers at an alternative. Input format: "DIR,N".
+
 Movement rules:
 - move(up) increases y by 1
 - move(down) decreases y by 1
