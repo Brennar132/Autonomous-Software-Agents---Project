@@ -615,17 +615,26 @@ async function followPath(start, goal, getPosition, maxRetries = 8) {
       //Oppurtinistic pickup: if we see a parcel on the ground at our new position, pick it up before continuing to navigate to the goal
       const stackTarget = activeRules.requiredStackSize;
       const stackFull = stackTarget !== null && carrying.size >= stackTarget;
-      const here = stackFull ? null : [...parcels.values()].find(p => p.x === to.x && p.y === to.y && !p.carriedBy);
+      const here = stackFull ? null : [...parcels.values()].find(p =>
+        p.x === to.x && p.y === to.y &&
+        !p.carriedBy &&
+        p.reward > 0 &&
+        p.reward <= activeRules.maxParcelScore                 // respect score cap
+      );
       if (here) {
         const r = await pickUp();
         if (r.startsWith("Picked up")) {
-      carrying.add(here.id);
-      console.log(`Opportunistic pickup of ${here.id} at (${to.x},${to.y}).`);
-    }
+          carrying.add(here.id);
+          console.log(`Opportunistic pickup of ${here.id} at (${to.x},${to.y}).`);
+          // if this pickup just completed the stack, stop grabbing more
+          if (stackTarget !== null && carrying.size >= stackTarget) {
+            console.log(`Stack complete (${carrying.size}/${stackTarget}) — no more opportunistic pickups.`);
+          }
+        }
       }
     }
-  }
   return path ? `Arrived at (${goal.x}, ${goal.y}).` : "No path found.";
+  }
 }
 async function navigateTo(input) {
   const [x, y] = input.split(",").map(Number);
