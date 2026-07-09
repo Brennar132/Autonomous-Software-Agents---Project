@@ -87,7 +87,7 @@ socket.onTile(({x, y, type}) => {
         if (oldTile) {
             console.log(`[MAP UPDATE] Tile ${x},${y} changed: ${oldTile.type} -> ${type}`);
         } else {
-            console.log(`[MAP DISCOVERY] New tile found at ${x},${y}: type ${type}`);
+            //console.log(`[MAP DISCOVERY] New tile found at ${x},${y}: type ${type}`);
         }
 
         // Update the map
@@ -190,7 +190,7 @@ socket.onMsg(async (id, name, msg, reply) => {
 });
 
 // ==========================================
-// 2D. Position broadcast — make Alberto verbal
+// 2D. Position broadcast — send our position to teammate every second
 // ==========================================
 setInterval(() => {
   if (me.id && teamAgentId) {
@@ -216,7 +216,7 @@ const activeRules = {
 
 
 // ==========================================
-// 3. Standard Tools
+// 3. Standard Tools - given by the code skeleton
 // ==========================================
 
 function calculate(expression) {
@@ -232,7 +232,6 @@ function calculate(expression) {
 
 function getCurrentTime(location) {
   console.log("---- GET CURRENT TIME ----");
-
   try {
     const normalized = location.trim().toLowerCase();
 
@@ -335,6 +334,7 @@ async function getTile(input) {
 
 
 async function getDropoffs() {
+  // Return all known dropoff zones
   console.log("---- GET DROPOFFS ----");
   if (dropoffs.size === 0) {
     return "No dropoff zones discovered yet.";
@@ -343,6 +343,7 @@ async function getDropoffs() {
 }
 
 async function getSpawnPoints() {
+  // Return all known spawn points
   console.log("---- GET SPAWN POINTS ----");
   if (spawnPoints.size === 0) {
     return "No spawn points discovered yet.";
@@ -351,6 +352,7 @@ async function getSpawnPoints() {
 }
 
 async function pickUp() {
+  // Pick up a parcel at the current position, if available
   console.log("---- PICK UP ----");
   try {
     const result = await socket.emitPickup();  // check exact SDK name
@@ -362,6 +364,7 @@ async function pickUp() {
 }
 
 async function deliverParcel() {
+  // Deliver all parcels currently being carried, if at a dropoff zone
   console.log("---- DELIVER PARCEL ----");
   try {
     const result = await socket.emitPutdown();
@@ -391,16 +394,11 @@ async function searchForParcels(maxSpawnsToTry = 5) {
       .find(n => isWalkable(n.x, n.y));
     if (near) start = near;
   }
-  const t = [...spawnPoints.values()][0];
-  console.log('start:', start, 'walkable?', isWalkable(start.x, start.y));
-  console.log('test path to', t, ':', aStar(start, {x:t.x, y:t.y}, new Set()));
+
   const ranked = [...spawnPoints.values()]
     .map(s => {
       const fb = new Set(activeRules.forbiddenTiles);
       const path = aStar(start, { x: s.x, y: s.y }, fb);
-      if (s.x === 0 && s.y === 27) {
-        console.log('MAP CALL: s =', s, '| fb.size =', fb.size, '| path =', path ? path.length : 'NULL');
-      }
       return { spawn: s, cost: path ? path.length : Infinity };
     })
     .filter(e => e.cost !== Infinity)
@@ -425,6 +423,7 @@ async function searchForParcels(maxSpawnsToTry = 5) {
 
 
 async function collectNearbyAndDeliver() {
+  // Collect parcels nearby and deliver them to the closest dropoff zone
   console.log("---- COLLECT NEARBY PARCELS AND DELIVER ----");
 
   const target_stack = activeRules.requiredStackSize;   // null = no constraint
@@ -439,7 +438,7 @@ async function collectNearbyAndDeliver() {
       .filter(p => !p.carriedBy && p.reward > 0
         && p.reward <= activeRules.maxParcelScore
         && !processed.includes(p.id)
-        && pickupCoordination[p.id] !== teamAgentId)
+        && (pickupCoordination[p.id] === undefined || pickupCoordination[p.id] === socket.id))
       .sort((a, b) => b.reward - a.reward);
 
     if (candidates.length === 0) break;
@@ -494,9 +493,11 @@ async function collectNearbyAndDeliver() {
 // 3.2 Movement Tools
 // =========================================
 function heuristic({x: x1, y: y1}, {x: x2, y: y2}) {
-    return Math.abs(Math.round(x1) - Math.round(x2)) + Math.abs(Math.round(y1) - Math.round(y2));
+  //Heuristic function for A* (Manhattan distance)
+  return Math.abs(Math.round(x1) - Math.round(x2)) + Math.abs(Math.round(y1) - Math.round(y2));
 }
 function aStar(start, goal, blocked = new Set()) {
+  // A* pathfinding algorithm
     const open = [];
     const closed = new Set();
     const cameFrom = new Map();
@@ -558,6 +559,7 @@ function aStar(start, goal, blocked = new Set()) {
 }
 
 function reconstructPath(cameFrom, current) {
+  // Reconstructs the path from the cameFrom map
     const path = [current];
     while (cameFrom.has(key(current.x, current.y))) {
         current = cameFrom.get(key(current.x, current.y));
@@ -566,6 +568,7 @@ function reconstructPath(cameFrom, current) {
     return path.reverse();
 }
 function MoveIsAllowed(fromTile, toTile) {
+  // Checks if moving from fromTile to toTile is allowed based on directional constraints
   if (!fromTile || !toTile) return true;
   const dx = toTile.x - fromTile.x;
   const dy = toTile.y - fromTile.y;
@@ -579,6 +582,7 @@ function MoveIsAllowed(fromTile, toTile) {
 }
 
 async function followPath(start, goal, getPosition, maxRetries = 8, maxSteps = 200) {
+  // Follow a path from start to goal, avoiding blocked tiles, with retries and step limits
   const blocked = new Set(activeRules.forbiddenTiles);
   let path = aStar(start, goal, blocked);
   let failures = 0;
@@ -616,13 +620,12 @@ async function followPath(start, goal, getPosition, maxRetries = 8, maxSteps = 2
       console.log(`Moved ${direction} to (${to.x}, ${to.y}).`);
       path.shift();
       failures = Math.max(0, failures - 1);   // decay ONLY — no failures = 0 after this
-
-      // opportunistic pickup (your version, unchanged) ...
     }
   }
   return path ? `Arrived at (${goal.x}, ${goal.y}).` : "No path found.";
 }
 async function navigateTo(input) {
+  // Navigate to a specific coordinate (x,y) using A* pathfinding and movement commands
   const [x, y] = input.split(",").map(Number);
   const goal = { x, y };
   const start = { x: Math.round(me.x), y: Math.round(me.y) };
@@ -633,10 +636,11 @@ function isWalkable(x, y) {
     const tile = tileMap.get(`${x}_${y}`);
     if (!tile) return true;        // unknown = walkable, followPath self-corrects
     if (tile.type === '0') return false;   // wall = only hard block
-    return true;                   // 1, 2, 3, arrows all walkable
+    return true; 
 }
 
 async function navigateToClosestDropoff() {
+    // Navigate to the closest dropoff zone, considering reward multipliers and distance
     console.log("Navigating to best dropoff (reward-aware)...");
     if (dropoffs.size === 0) return "Error: no dropoff zones known.";
     if (me.x === null || me.y === null) return "Error: agent position unknown.";
@@ -656,6 +660,7 @@ async function navigateToClosestDropoff() {
 }
 
 async function navigateToClosestSpawn(input) {
+    // Navigate to the closest spawn point
     console.log("Navigating to closest spawn point...");
     if (spawnPoints.size === 0) return "Error: no spawn points discovered yet.";
     if (me.x === null || me.y === null) return "Error: agent position is not available yet.";
@@ -673,6 +678,7 @@ async function navigateToClosestSpawn(input) {
     return navigateTo(`${closest.x},${closest.y}`);
 }
 function extremeTiles(source, direction) {
+  // Returns the tiles at the extreme edge of the map in the given direction
   const tiles = [...source.values()];
   if (tiles.length === 0) return { tiles: [], value: null };
 
@@ -688,6 +694,7 @@ function extremeTiles(source, direction) {
 }
 
 async function deliverToExtreme(input) {
+  //Delivers to extreme tile in a given direction, with point penalties or rewards
   console.log("---- EXTREME TILE RULE ----");
   // input format: "direction,points"  e.g. "left,5" or "up,-10"
   const [dirRaw, ptsRaw] = String(input).split(",");
@@ -733,6 +740,7 @@ async function deliverToExtreme(input) {
 }
 
 function nearestOddRow() {
+  //Helper function for challenge
   let best = null, bestDist = Infinity;
   for (const t of tileMap.values()) {
     if (t.type === '0') continue;               // wall
@@ -743,7 +751,7 @@ function nearestOddRow() {
   return best;
 }
 function nearestHandoffTile() {
-  // adjacent tiles to me, in preference order
+  //Helper function for challenge to make Agent A drop of a tile for me to deliver
   const neighbors = [
     { x: me.x + 1, y: me.y },
     { x: me.x - 1, y: me.y },
@@ -768,6 +776,7 @@ function nearestHandoffTile() {
 }
 
 async function stackDeliver(input) {
+  // Collect exactly N parcels and deliver them together, if possible
   console.log("---- STACK DELIVER ----");
   const n = Number(String(input).trim());
   if (!Number.isInteger(n) || n <= 0) return `Error: invalid stack size "${input}".`;
@@ -787,11 +796,13 @@ async function stackDeliver(input) {
 // ==========================================
 
 async function tellTeamMate(msg) {
+  // Send a message to the teammate agent
   if (!teamAgentId) return "Error: no team agent ID specified for communication.";
   await socket.emitSay(teamAgentId, msg);
   return "Message sent to team mate.";
 }
 async function approchAndRelease(_input){
+  //Coordination challange, approach teammate and wait until within distance 3, then release him to continue
   console.log("---- APPROACH TEAMMATE ----");
   if(!teamAgentId) return "Error: no team agent ID specified for communication.";
 
@@ -842,6 +853,7 @@ async function approchAndRelease(_input){
 }
 
 async function redLight(_input) {
+  // Coordination challenge: tell teammate to stop, move to an odd row, then tell him to resume
   console.log("---- RED LIGHT GREEN LIGHT ----");
   if (!teamAgentId) return "Error: no teammate specified.";
 
@@ -863,16 +875,18 @@ async function redLight(_input) {
       return `Could not reach an odd row (${nav}); released teammate.`;
     }
   }
-  return 'Red light sent waitinf for green light'
+  return "Red light active: teammate and I moved to odd rows and are holding.";
 }
 
 async function greenLight(_input) {
+  // Coordination challenge: tell teammate to resume moving
   if(!teamAgentId) return "Error: no teammate found"
   socket.emitSay(teamAgentId, {type: 'greenlight'})
   return "Green light given agents can move"
 }
 
 async function requestFetch(input) {
+  //Request teammate to fetch parcels and drop them at a nearby tile for me to pick up and deliver
   console.log("---- REQUEST FETCH ----");
   if (!teamAgentId) return "Error: no teammate specified.";
 
@@ -905,7 +919,7 @@ async function requestFetch(input) {
 }
 
 // ==========================================
-// 3.4 Game Strategy Adaption
+// 3.4 Game Strategy Adaption - Rules Management fumnction for special missions of type 2
 // ==========================================
 
 async function addForbiddenTile(input) {
