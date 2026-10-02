@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Local configuration and secrets (copy .env.example to .env)
+.env
+
+# Planner output and local Fast Downward checkout
+sas_plan
+fast-downward/
+
+# OS and editor files
+.DS_Store
+.Rhistory
+*.code-workspace
